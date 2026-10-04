@@ -44,7 +44,7 @@ fn split_areas(area: Rect, keymap: bool) -> (Rect, Rect, Rect, Rect) {
     if is_narrow(area) {
         return (main, main, map, footer);
     }
-    let side_w = (area.width / 4).clamp(30, 48).min(area.width.saturating_sub(20));
+    let side_w = cfg().sidebar_width.map(|w| w.max(20)).unwrap_or((area.width / 4).clamp(30, 48)).min(area.width.saturating_sub(20));
     let [side, pane] = Layout::horizontal([Constraint::Length(side_w), Constraint::Fill(1)]).areas(main);
     (side, pane, map, footer)
 }

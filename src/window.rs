@@ -8,9 +8,11 @@ use std::process::{Command, Stdio};
 /// Tried in order when $TERMINAL isn't set.
 const TERMINALS: [&str; 6] = ["kitty", "foot", "alacritty", "wezterm", "ghostty", "xterm"];
 
-/// $TERMINAL (which may carry its own flags), else the first known one on $PATH.
+/// The config's `terminal`, else $TERMINAL (either may carry its own flags),
+/// else the first known one on $PATH.
 pub fn terminal() -> Option<Vec<String>> {
-    if let Some(t) = std::env::var("TERMINAL").ok().filter(|t| !t.trim().is_empty()) {
+    let chosen = crate::config::cfg().terminal.clone().or_else(|| std::env::var("TERMINAL").ok());
+    if let Some(t) = chosen.filter(|t| !t.trim().is_empty()) {
         return Some(t.split_whitespace().map(String::from).collect());
     }
     TERMINALS.iter().find(|t| on_path(t)).map(|t| vec![t.to_string()])

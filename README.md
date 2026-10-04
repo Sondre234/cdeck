@@ -205,7 +205,7 @@ them; the footer shows `quiet` while they're off.
 ## Own terminal window (`E`)
 
 Opens `claude --resume <id>` in the chat's directory in a new terminal window.
-Uses `$TERMINAL` if set, otherwise the first of `kitty`, `foot`, `alacritty`,
+Uses `terminal` from the [config](#config) if set, then `$TERMINAL`, otherwise the first of `kitty`, `foot`, `alacritty`,
 `wezterm`, `ghostty`, `xterm` found on `$PATH`.
 
 ## Config
@@ -221,6 +221,12 @@ narrow_width = 100
 
 # Chats listed per directory before the rest fold behind "… n more" (z).
 group_limit = 5
+
+# Terminal for E / :win, with any flags; overrides $TERMINAL.
+terminal = "kitty --single-instance"
+
+# Fixed chat-list width in columns. Unset: a quarter of the window, 30–48.
+sidebar_width = 40
 ```
 
 ## Files and environment
@@ -231,7 +237,7 @@ group_limit = 5
 | `$XDG_CONFIG_HOME/cdeck/config.toml` (default `~/.config/cdeck/`) | settings, see [Config](#config) |
 | `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
 | `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed-title cache so startup doesn't reread every transcript; safe to delete |
-| `$TERMINAL` | terminal used by `E` / `:win` |
+| `$TERMINAL` | terminal used by `E` / `:win`, unless the config sets `terminal` |
 | `$CDECK_CLAUDE` | program to run instead of `claude` (testing) |
 
 ## Development
