@@ -1,6 +1,7 @@
 //! Reading Claude Code's on-disk state: session transcripts under
 //! ~/.claude/projects and the per-process status files under ~/.claude/sessions.
 
+use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -321,9 +322,23 @@ pub fn running() -> HashMap<String, Running> {
 }
 
 pub enum Entry {
-    User(String),
-    Assistant(String),
+    User(Msg),
+    Assistant(Msg),
     Tool(String),
+}
+
+/// A message and when it was sent. Derefs to the text, so code that only
+/// cares about the words can treat it as a `str`.
+pub struct Msg {
+    pub text: String,
+    pub at: Option<DateTime<Utc>>,
+}
+
+impl std::ops::Deref for Msg {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.text
+    }
 }
 
 /// Full transcript for the preview pane.
@@ -346,13 +361,15 @@ fn line_entries(line: &str, out: &mut Vec<Entry>) {
         return;
     }
     let content = &v["message"]["content"];
+    let at = v["timestamp"].as_str().and_then(|t| DateTime::parse_from_rfc3339(t).ok()).map(|t| t.to_utc());
+    let msg = |text: String| Msg { text, at };
     match v["type"].as_str() {
         Some("user") => {
             if let Some(t) = user_text(content) {
                 if let Some(cmd) = between(&t, "<command-name>", "</command-name>") {
-                    out.push(Entry::User(cmd.into()));
+                    out.push(Entry::User(msg(cmd.into())));
                 } else if !t.starts_with('<') {
-                    out.push(Entry::User(t));
+                    out.push(Entry::User(msg(t)));
                 }
             }
         }
@@ -361,7 +378,7 @@ fn line_entries(line: &str, out: &mut Vec<Entry>) {
                 match b["type"].as_str() {
                     Some("text") => {
                         if let Some(t) = b["text"].as_str().filter(|t| !t.trim().is_empty()) {
-                            out.push(Entry::Assistant(t.trim().into()));
+                            out.push(Entry::Assistant(msg(t.trim().into())));
                         }
                     }
                     Some("tool_use") => {
@@ -502,6 +519,16 @@ mod tests {
         assert!(find("café").is_some());
         assert!(find("\"quoted\"").is_some());
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn messages_keep_their_timestamp() {
+        let mut out = Vec::new();
+        line_entries(r#"{"type":"user","timestamp":"2026-10-04T18:54:49.475Z","message":{"content":"hi"}}"#, &mut out);
+        line_entries(r#"{"type":"user","message":{"content":"no time"}}"#, &mut out);
+        let [Entry::User(a), Entry::User(b)] = &out[..] else { panic!() };
+        assert_eq!(a.at.map(|t| t.timestamp()), Some(1_791_140_089));
+        assert_eq!((&**a, b.at), ("hi", None));
     }
 
     #[test]

@@ -719,10 +719,15 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut owners: Vec<Option<usize>> = Vec::new();
         let mut after_user = true;
+        let now = chrono::Local::now().naive_local();
         for (ei, e) in entries.iter().enumerate() {
             match e {
                 Entry::User(t) => {
-                    lines.push(Line::from(""));
+                    // When it was sent, above the bubble; not part of the
+                    // message as far as search is concerned.
+                    let at = t.at.map(|at| stamp(at.with_timezone(&chrono::Local).naive_local(), now)).unwrap_or_default();
+                    lines.push(Line::from(vec![Span::raw(margin.clone()), Span::styled(format!("     {at}"), Style::new().fg(th().faint))]));
+                    owners.resize(lines.len(), None);
                     let bubble_w = cw.saturating_sub(6).min(t.lines().map(|l| l.width()).max().unwrap_or(0) + 2).max(4);
                     let wrapped: Vec<String> = t.lines().flat_map(|l| wrap(l, bubble_w - 2)).collect();
                     for (i, l) in wrapped.iter().enumerate() {
@@ -797,6 +802,19 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
         .map(|i| if searching && owners[i].is_some() { highlight(&lines[i], q) } else { lines[i].clone() })
         .collect::<Vec<_>>();
     f.render_widget(Paragraph::new(visible), area);
+}
+
+/// Local send time, as short as stays unambiguous: `14:32` today,
+/// `Mon 14:32` this past week, `3 Oct` this year, `3 Oct 2025` before.
+fn stamp(t: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
+    use chrono::Datelike;
+    let fmt = match (now.date() - t.date()).num_days() {
+        0 => "%H:%M",
+        1..7 => "%a %H:%M",
+        _ if t.year() == now.year() => "%-d %b",
+        _ => "%-d %b %Y",
+    };
+    t.format(fmt).to_string()
 }
 
 /// Mark every case-insensitive occurrence of `needle` (lowercase) in the
@@ -1185,4 +1203,20 @@ fn draw_keymap(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stamps_get_coarser_with_age() {
+        let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let now = at("2026-10-04 15:00");
+        assert_eq!(stamp(at("2026-10-04 09:05"), now), "09:05");
+        assert_eq!(stamp(at("2026-10-03 23:59"), now), "Sat 23:59");
+        assert_eq!(stamp(at("2026-09-28 14:32"), now), "Mon 14:32");
+        assert_eq!(stamp(at("2026-09-27 14:32"), now), "27 Sep");
+        assert_eq!(stamp(at("2025-12-31 14:32"), now), "31 Dec 2025");
+    }
 }
