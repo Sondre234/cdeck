@@ -1,4 +1,5 @@
 mod clip;
+mod config;
 mod data;
 mod dirpick;
 mod theme;
@@ -39,7 +40,6 @@ pub enum Focus {
     Pane,
 }
 
-const GROUP_LIMIT: usize = 5;
 /// Claude's `waitingFor` while a tool permission dialog is up (otherwise "input needed").
 const PERMISSION: &str = "permission prompt";
 /// Pseudo session id for the "+ New chat" row.
@@ -64,6 +64,12 @@ pub struct Item {
     /// Where the filter matched inside the transcript, when it missed the title.
     pub snippet: Option<String>,
 }
+
+pub type Wrapped = (String, u64, u16, Vec<ratatui::text::Line<'static>>, Vec<Option<usize>>);
+
+/// Preview state of the split's right half (transcript, rendering, scroll),
+/// swapped into the main fields while that half is drawn or scrolled.
+pub type SplitView = (Option<(String, u64, Vec<Entry>)>, Option<Wrapped>, usize);
 
 pub enum Status<'a> {
     Busy,
@@ -94,7 +100,7 @@ pub struct App {
     pub preview: Option<(String, u64, Vec<Entry>)>,
     /// Rendered preview, plus which transcript entry each line came from
     /// (None for tool calls, which search skips).
-    pub wrapped: Option<(String, u64, u16, Vec<ratatui::text::Line<'static>>, Vec<Option<usize>>)>,
+    pub wrapped: Option<Wrapped>,
     /// Chat whose preview should scroll to the search match once it's known.
     pub jump_to_match: Option<String>,
     /// Match n/N last landed on (chat, line, preview_scroll), so stepping
@@ -111,11 +117,21 @@ pub struct App {
     pub hold: Option<(usize, usize, usize)>,
     pub pane: (u16, u16),
     pub help: bool,
+    /// Chat held in the right half of a split pane (`Ctrl-w v`); the left
+    /// half keeps following the selection.
+    pub split: Option<String>,
+    pub split_view: SplitView,
+    /// With the pane focused: the right half has it rather than the left.
+    pub split_focus: bool,
+    /// Below `narrow_width`: list and pane take turns, and nothing splits.
+    pub narrow: bool,
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
     pub keymap: bool,
     pub pinned: HashSet<String>,
     /// Hidden from the list; the transcripts themselves are never touched.
     pub archived: HashSet<String>,
+    /// Local display names (`R`), shown instead of Claude's titles.
+    pub names: HashMap<String, String>,
     pub show_archived: bool,
     pub tick: usize,
     /// Ctrl-L: throw away what's on screen and draw everything again.
@@ -162,7 +178,7 @@ impl App {
             filter: String::new(),
             search: Default::default(),
             live_only: false,
-            msg: None,
+            msg: config::error().map(|e| (e.into(), true)),
             preview: None,
             wrapped: None,
             jump_to_match: None,
@@ -175,9 +191,14 @@ impl App {
             hold: None,
             pane: (24, 80),
             help: false,
+            split: None,
+            split_view: Default::default(),
+            split_focus: false,
+            narrow: false,
             keymap: !state_file("keymap-hidden").exists(),
             pinned: load_ids("pinned"),
             archived: load_ids("archived"),
+            names: parse_names(&std::fs::read_to_string(state_file("names")).unwrap_or_default()),
             show_archived: false,
             tick: 0,
             repaint: false,
@@ -221,6 +242,36 @@ impl App {
         }
     }
 
+    /// A local name wins over whatever Claude called the chat.
+    fn title_of(&self, s: &data::Session) -> String {
+        self.names.get(&s.id).cloned().unwrap_or_else(|| s.title().into())
+    }
+
+    /// Focus is on the split's right half.
+    pub fn on_right(&self) -> bool {
+        self.focus == Focus::Pane && self.split_focus && self.split.is_some()
+    }
+
+    /// The chat that pane keys, typing and Enter act on: the right half's
+    /// when it has focus, else the selection.
+    pub fn pane_id(&self) -> Option<&str> {
+        if self.on_right() { self.split.as_deref() } else { self.selected.as_deref() }
+    }
+
+    /// A chat's list entry, or one made up for a chat the list currently
+    /// hides (filtered out, say) but the split still shows.
+    pub fn find_item(&self, id: &str) -> Option<Item> {
+        let listed = self.rows.iter().find_map(|r| match r {
+            Row::Item(i) if i.id == id => Some(i.clone()),
+            _ => None,
+        });
+        listed.or_else(|| {
+            let placeholder = self.live(id).map(|l| data::Session::new_placeholder(&l.id, &l.cwd));
+            let s = self.store.sessions.get(id).or(placeholder.as_ref())?;
+            Some(Item { id: s.id.clone(), cwd: s.cwd.clone(), title: self.title_of(s), branch: s.branch.clone(), mtime: s.mtime, snippet: None })
+        })
+    }
+
     pub fn selected_item(&self) -> Option<&Item> {
         let id = self.selected.as_deref()?;
         self.rows.iter().find_map(|r| match r {
@@ -248,7 +299,7 @@ impl App {
                     Item {
                         id: s.id.clone(),
                         cwd: s.cwd.clone(),
-                        title: s.title().into(),
+                        title: self.title_of(s),
                         branch: s.branch.clone(),
                         mtime: s.mtime,
                         snippet: None,
@@ -260,7 +311,7 @@ impl App {
         for l in &self.lives {
             items.entry(l.id.clone()).or_insert_with(|| {
                 let s = data::Session::new_placeholder(&l.id, &l.cwd);
-                Item { id: l.id.clone(), cwd: l.cwd.clone(), title: s.title().into(), branch: None, mtime: s.mtime, snippet: None }
+                Item { id: l.id.clone(), cwd: l.cwd.clone(), title: self.title_of(&s), branch: None, mtime: s.mtime, snippet: None }
             });
         }
         let query = search::Query::parse(&self.filter);
@@ -319,10 +370,11 @@ impl App {
             let mut items = Vec::new();
             for (_, i) in v {
                 let keep = open
-                    || shown < GROUP_LIMIT
+                    || shown < config::cfg().group_limit
                     || self.live(&i.id).is_some()
                     || self.running.contains_key(&i.id)
-                    || self.selected.as_deref() == Some(i.id.as_str());
+                    || self.selected.as_deref() == Some(i.id.as_str())
+                    || self.split.as_deref() == Some(i.id.as_str());
                 if keep {
                     shown += 1;
                     items.push(Row::Item(i));
@@ -334,7 +386,7 @@ impl App {
             self.rows.extend(items);
             if hidden > 0 {
                 self.rows.push(Row::More { hidden });
-            } else if self.expanded.contains(&cwd) && count > GROUP_LIMIT {
+            } else if self.expanded.contains(&cwd) && count > config::cfg().group_limit {
                 self.rows.push(Row::More { hidden: 0 });
             }
         }
@@ -358,6 +410,7 @@ impl App {
         self.picker = None;
         self.select(Some(NEW_CHAT.into()));
         self.focus = Focus::Pane;
+        self.split_focus = false;
         self.mode = Mode::Compose;
     }
 
@@ -585,13 +638,18 @@ impl App {
         if !cwd.is_dir() {
             return self.error(&format!("{} does not exist", data::tilde(cwd)));
         }
+        // Resuming the right half's chat keeps it there instead of selecting it.
+        let right = self.on_right() && self.split.as_deref() == Some(id);
         match Live::spawn(id, cwd, &args, self.pane) {
             Ok(l) => {
                 self.lives.push(l);
                 self.rebuild();
-                self.select(Some(id.into()));
+                if !right {
+                    self.select(Some(id.into()));
+                }
                 self.mode = Mode::Insert;
                 self.focus = Focus::Pane;
+                self.split_focus = right;
                 self.msg = None;
             }
             Err(e) => self.error(&format!("spawn failed: {e}")),
@@ -604,15 +662,18 @@ impl App {
     }
 
     fn open(&mut self, force: bool) {
-        if self.selected.as_deref() == Some(NEW_CHAT) {
+        let right = self.on_right();
+        let Some(id) = self.pane_id().map(String::from) else { return };
+        if id == NEW_CHAT {
             return self.start_compose(self.selected_dir());
         }
-        let Some(item) = self.selected_item().cloned() else { return };
+        let Some(item) = self.find_item(&id) else { return };
         if let Some(l) = self.live_mut(&item.id) {
             l.reset_scroll();
             l.unseen = false;
             self.mode = Mode::Insert;
             self.focus = Focus::Pane;
+            self.split_focus = right;
             return;
         }
         if let Some(r) = self.running.get(&item.id) {
@@ -709,6 +770,33 @@ impl App {
         }
     }
 
+    /// Name the selected chat locally; an empty name goes back to Claude's title.
+    fn rename_selected(&mut self, name: &str) {
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to rename") };
+        let name: String = name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let name = name.trim();
+        let cleared = name.is_empty();
+        if cleared {
+            self.names.remove(&id);
+        } else {
+            self.names.insert(id, name.into());
+        }
+        self.rebuild();
+        let path = state_file("names");
+        let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, format_names(&self.names)));
+        match saved {
+            Err(e) => self.error(&format!("couldn't save names: {e}")),
+            Ok(()) => self.info(if cleared { "name cleared · back to Claude's title" } else { "renamed (only in cdeck) · :rename with no name undoes" }),
+        }
+    }
+
+    /// R: the command line, prefilled with the current title to edit.
+    fn start_rename(&mut self) {
+        let Some(title) = self.selected_item().map(|i| i.title.clone()) else { return self.error("select a chat to rename") };
+        self.cmdline = format!("rename {title}");
+        self.mode = Mode::Command;
+    }
+
     fn toggle_show_archived(&mut self) {
         self.show_archived = !self.show_archived;
         self.rebuild();
@@ -716,7 +804,7 @@ impl App {
     }
 
     fn kill_selected(&mut self) {
-        let Some(id) = self.selected.clone() else { return };
+        let Some(id) = self.pane_id().map(String::from) else { return };
         if let Some(pos) = self.lives.iter().position(|l| l.id == id) {
             self.lives.remove(pos);
             self.info("killed — transcript kept, Enter resumes it");
@@ -727,14 +815,26 @@ impl App {
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
+        self.scroll_in(self.on_right(), up, amount);
+    }
+
+    /// Scroll the left half (the selection) or the split's right half.
+    fn scroll_in(&mut self, right: bool, up: bool, amount: usize) {
         self.jump_to_match = None;
-        let id = self.selected.clone().unwrap_or_default();
+        let id = if right { self.split.clone() } else { self.selected.clone() }.unwrap_or_default();
         if let Some(l) = self.live(&id) {
-            l.scroll(if up { amount as isize } else { -(amount as isize) });
-        } else if up {
+            return l.scroll(if up { amount as isize } else { -(amount as isize) });
+        }
+        if right {
+            ui::swap_split_view(self);
+        }
+        if up {
             self.preview_scroll += amount;
         } else {
             self.preview_scroll = self.preview_scroll.saturating_sub(amount);
+        }
+        if right {
+            ui::swap_split_view(self);
         }
     }
 
@@ -759,7 +859,9 @@ impl App {
             let start = lines.len().saturating_sub(self.preview_scroll + self.pane.0 as usize);
             self.hold = ui::anchor(owners, start);
         }
+        // Both halves of a split render tools the same way.
         self.wrapped = None;
+        self.split_view.1 = None;
         self.info(match (self.show_tools, self.live(&id).is_some()) {
             (true, true) => "tool output on · shows in transcript previews, not live chats",
             (true, false) => "tool output on · t hides it",
@@ -767,18 +869,30 @@ impl App {
         });
     }
 
-    /// The selected chat's transcript preview has search matches to step through.
+    /// The focused chat's transcript preview has search matches to step through.
     pub fn has_matches(&self) -> bool {
-        self.selected.as_deref().is_some_and(|id| self.live(id).is_none() && self.search.hits.contains_key(id))
+        self.pane_id().is_some_and(|id| self.live(id).is_none() && self.search.hits.contains_key(id))
     }
 
     /// n/N: step through search matches in a transcript preview, wrapping.
     /// False when the chat has no hits, so the key keeps its usual meaning.
     fn step_match(&mut self, forward: bool) -> bool {
+        let right = self.on_right();
+        if right {
+            ui::swap_split_view(self);
+        }
+        let stepped = self.step_match_here(forward);
+        if right {
+            ui::swap_split_view(self);
+        }
+        stepped
+    }
+
+    fn step_match_here(&mut self, forward: bool) -> bool {
         if !self.has_matches() {
             return false;
         }
-        let id = self.selected.clone().unwrap_or_default();
+        let id = self.pane_id().unwrap_or_default().to_string();
         let Some((_, _, _, lines, owners)) = self.wrapped.as_ref().filter(|w| w.0 == id) else { return false };
         let (len, ms) = (lines.len(), ui::match_lines(lines, owners, &self.search.query));
         if ms.is_empty() {
@@ -841,6 +955,7 @@ impl App {
             "pin" => self.toggle_pin(),
             "win" | "win!" => self.open_window(cmd.ends_with('!')),
             "archive" => self.toggle_archive(),
+            "rename" => self.rename_selected(arg),
             "archived" => self.toggle_show_archived(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
             "r" | "refresh" => self.refresh(),
@@ -856,6 +971,11 @@ impl App {
             "copy" if arg == "all" => self.copy_selected(true),
             "copy" => self.error("usage: :copy (last reply) or :copy all (whole chat)"),
             "h" | "help" => self.help = true,
+            "config" => {
+                let p = config::path();
+                let state = if p.exists() { "" } else { " (not created yet — defaults in use)" };
+                self.info(&format!("config: {}{state}", data::tilde(&p)));
+            }
             _ => self.error(&format!("unknown command: {cmd}")),
         }
     }
@@ -883,11 +1003,47 @@ impl App {
         self.rebuild();
     }
 
+    /// Ctrl-w v: keep the selected chat in a right half while the left half
+    /// follows the selection, so two chats can be watched side by side.
+    fn split_pane(&mut self) {
+        if self.narrow {
+            return self.error("too narrow to split — widen the window (narrow_width in the config)");
+        }
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to split off") };
+        self.split = Some(id);
+        // Already looking at it: focus follows it to the right.
+        self.split_focus = self.focus == Focus::Pane;
+        self.info("split · the right half keeps this chat, the left follows the selection · Ctrl-w q closes");
+    }
+
+    fn unsplit(&mut self) {
+        self.split = None;
+        self.split_view = Default::default();
+        self.split_focus = false;
+    }
+
+    /// Ctrl-w w: list → pane (→ right half when split) → list.
     fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Sidebar => Focus::Pane,
-            Focus::Pane => Focus::Sidebar,
-        };
+        match (self.focus, self.split.is_some() && !self.split_focus) {
+            (Focus::Sidebar, _) => self.focus_pane(false),
+            (Focus::Pane, true) => self.split_focus = true,
+            (Focus::Pane, false) => self.focus = Focus::Sidebar,
+        }
+    }
+
+    fn focus_pane(&mut self, right: bool) {
+        self.focus = Focus::Pane;
+        self.split_focus = right && self.split.is_some();
+    }
+
+    /// Ctrl-w l / h: one step right or left along list, left half, right half.
+    fn focus_step(&mut self, right: bool) {
+        match (self.focus, right) {
+            (Focus::Sidebar, true) => self.focus_pane(false),
+            (Focus::Pane, true) => self.focus_pane(true),
+            (Focus::Pane, false) if self.on_right() => self.split_focus = false,
+            (_, false) => self.focus = Focus::Sidebar,
+        }
     }
 
     fn refresh(&mut self) {
@@ -983,7 +1139,7 @@ impl App {
                     self.focus = Focus::Sidebar;
                     return;
                 }
-                let id = self.selected.clone().unwrap_or_default();
+                let id = self.pane_id().unwrap_or_default().to_string();
                 match self.live(&id) {
                     Some(l) => {
                         l.reset_scroll();
@@ -1067,8 +1223,8 @@ impl App {
                     KeyCode::Char('e') => self.move_by(isize::MAX / 2),
                     KeyCode::Char('n') => self.jump_group(true),
                     KeyCode::Char('p') => self.jump_group(false),
-                    KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
-                    KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Pane,
+                    KeyCode::Left | KeyCode::Char('h') => self.focus_step(false),
+                    KeyCode::Right | KeyCode::Char('l') => self.focus_step(true),
                     _ => {}
                 }
             }
@@ -1076,9 +1232,11 @@ impl App {
             Mode::Window => {
                 self.mode = Mode::Normal;
                 match k.code {
-                    KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
-                    KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Pane,
+                    KeyCode::Left | KeyCode::Char('h') => self.focus_step(false),
+                    KeyCode::Right | KeyCode::Char('l') => self.focus_step(true),
                     KeyCode::Char('w') => self.toggle_focus(),
+                    KeyCode::Char('v') => self.split_pane(),
+                    KeyCode::Char('q') | KeyCode::Char('o') => self.unsplit(),
                     _ => {}
                 }
             }
@@ -1087,8 +1245,8 @@ impl App {
                 let half = (self.pane.0 / 2).max(1) as usize;
                 // Focus changes work from either side.
                 match k.code {
-                    KeyCode::Left if ctrl => return self.focus = Focus::Sidebar,
-                    KeyCode::Right if ctrl => return self.focus = Focus::Pane,
+                    KeyCode::Left if ctrl => return self.focus_step(false),
+                    KeyCode::Right if ctrl => return self.focus_step(true),
                     KeyCode::Char('w') if ctrl => return self.mode = Mode::Window,
                     KeyCode::Char('n') if ctrl => return self.start_compose(self.selected_dir()),
                     KeyCode::Char('l') if ctrl => return self.repaint = true,
@@ -1134,6 +1292,7 @@ impl App {
                     KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('p') => self.toggle_pin(),
                     KeyCode::Char('x') => self.toggle_archive(),
+                    KeyCode::Char('R') => self.start_rename(),
                     KeyCode::Char('E') => self.open_window(false),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
@@ -1166,7 +1325,7 @@ impl App {
     fn on_paste(&mut self, s: &str) {
         match self.mode {
             Mode::Insert => {
-                if let Some(l) = self.selected.as_deref().and_then(|id| self.live(id)) {
+                if let Some(l) = self.pane_id().and_then(|id| self.live(id)) {
                     l.paste(s);
                 }
             }
@@ -1192,13 +1351,19 @@ impl App {
         let before = self.lives.len();
         self.lives.retain_mut(|l| !l.reap());
         if self.lives.len() != before {
-            if self.mode == Mode::Insert && self.selected.as_deref().is_some_and(|id| self.live(id).is_none()) {
+            if self.mode == Mode::Insert && self.pane_id().is_some_and(|id| self.live(id).is_none()) {
                 self.mode = Mode::Normal;
             }
             self.info("session exited");
             self.rebuild();
         }
+        // A brand-new chat that exited before writing a transcript leaves
+        // nothing for the right half to show.
+        if self.split.as_deref().is_some_and(|id| self.find_item(id).is_none()) {
+            self.unsplit();
+        }
         let sel = self.selected.clone();
+        let focused = self.pane_id().map(String::from);
         let ids: Vec<String> = self.lives.iter().map(|l| l.id.clone()).collect();
         for id in ids {
             let (now, waiting_for) = match self.status(&id) {
@@ -1212,16 +1377,17 @@ impl App {
                 _ => Instant::now(),
             };
             let was = self.phase.insert(id.clone(), (now, trusted, since));
-            let selected = sel.as_deref() == Some(id.as_str());
+            // On screen in either half counts as seen.
+            let selected = sel.as_deref() == Some(id.as_str()) || self.split.as_deref() == Some(id.as_str());
             if was.is_some_and(|w| w.0 == Phase::Busy) && now != Phase::Busy && !selected {
                 if let Some(l) = self.live_mut(&id) {
                     l.unseen = true;
                 }
             }
-            // A selected chat only counts as watched while its pane has focus.
+            // A chat only counts as watched while its pane (half) has focus.
             // Only Claude's own status file is trusted: the output-activity
             // fallback flickers (redraws, resizes) and would spam.
-            let watching = selected && self.focus == Focus::Pane;
+            let watching = focused.as_deref() == Some(id.as_str()) && self.focus == Focus::Pane;
             let was = was.filter(|w| w.1 && trusted).map(|w| w.0);
             if let Some(what) = noteworthy(was, now).filter(|_| !watching) {
                 self.ring |= self.bell;
@@ -1239,8 +1405,8 @@ impl App {
 
     fn notify_send(&self, id: &str, what: &str) {
         let (title, cwd) = match self.store.sessions.get(id) {
-            Some(s) => (s.title().to_string(), s.cwd.clone()),
-            None => ("(new session)".into(), self.live(id).map(|l| l.cwd.clone()).unwrap_or_default()),
+            Some(s) => (self.title_of(s), s.cwd.clone()),
+            None => (self.names.get(id).cloned().unwrap_or_else(|| "(new session)".into()), self.live(id).map(|l| l.cwd.clone()).unwrap_or_default()),
         };
         let body = format!("{} · {what}", data::tilde(&cwd));
         // Detached and best-effort: no notify-send, no notification.
@@ -1337,6 +1503,7 @@ fn main() -> std::io::Result<()> {
             // Switching Claude Code themes recolours cdeck live.
             if theme::reload_if_changed() {
                 app.wrapped = None;
+                app.split_view.1 = None;
             }
             if last_scan.elapsed() >= Duration::from_secs(3) {
                 last_scan = Instant::now();
@@ -1372,7 +1539,14 @@ fn main() -> std::io::Result<()> {
             resized_at = None;
             dirty = true;
         }
-        let pane = ui::pane_size(size.into(), app.keymap);
+        app.narrow = ui::is_narrow(size.into());
+        if app.narrow && app.split.is_some() {
+            app.unsplit();
+        }
+        // Split or not, every live chat gets the size it would be drawn at:
+        // both halves are equally wide, so moving the selection never resizes
+        // anything; only splitting, unsplitting and the window itself do.
+        let pane = ui::pane_size(size.into(), app.keymap, app.split.is_some());
         app.pane = pane;
         for l in &mut app.lives {
             l.resize(pane);
@@ -1469,6 +1643,22 @@ fn save_ids(name: &str, ids: &HashSet<String>) -> std::io::Result<()> {
     std::fs::write(path, v.iter().map(|id| format!("{id}\n")).collect::<String>())
 }
 
+/// Local names, one `id<TAB>name` per line: greppable and hand-editable like
+/// the id lists. Lines without a tab or with an empty name are skipped.
+fn parse_names(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(id, name)| (id.trim().to_string(), name.trim().to_string()))
+        .filter(|(id, name)| !id.is_empty() && !name.is_empty())
+        .collect()
+}
+
+fn format_names(names: &HashMap<String, String>) -> String {
+    let mut v: Vec<_> = names.iter().collect();
+    v.sort();
+    v.iter().map(|(id, name)| format!("{id}\t{name}\n")).collect()
+}
+
 impl App {
     fn toggle_keymap(&mut self) {
         self.keymap = !self.keymap;
@@ -1485,6 +1675,8 @@ impl App {
 #[derive(Default)]
 pub struct Hits {
     pub side: ratatui::layout::Rect,
+    /// The split's right half; empty when not split.
+    pub split: ratatui::layout::Rect,
     pub list: ratatui::layout::Rect,
     /// Row index for each visible line of the chat list (None = spacer).
     pub rows: Vec<Option<usize>>,
@@ -1496,6 +1688,7 @@ impl App {
         let at = ratatui::layout::Position::new(m.column, m.row);
         let in_side = self.hits.side.contains(at);
         let in_pane = self.hits.pane.contains(at);
+        let in_split = self.hits.split.contains(at);
         if self.help {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.help = false;
@@ -1508,24 +1701,26 @@ impl App {
                 self.leave_pane_modes();
                 self.move_by(if m.kind == MouseEventKind::ScrollDown { 1 } else { -1 });
             }
-            MouseEventKind::ScrollUp if in_pane => self.scroll(true, 3),
-            MouseEventKind::ScrollDown if in_pane => self.scroll(false, 3),
+            // Each half scrolls under the pointer, whichever has focus.
+            MouseEventKind::ScrollUp if in_pane || in_split => self.scroll_in(in_split, true, 3),
+            MouseEventKind::ScrollDown if in_pane || in_split => self.scroll_in(in_split, false, 3),
             MouseEventKind::Down(MouseButton::Left) if self.hits.list.contains(at) => {
                 let line = (m.row - self.hits.list.y) as usize;
                 let Some(Some(i)) = self.hits.rows.get(line).copied() else { return };
                 self.leave_pane_modes();
                 self.click_row(i);
             }
-            MouseEventKind::Down(MouseButton::Left) if in_pane => {
-                if !matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Compose) {
+            MouseEventKind::Down(MouseButton::Left) if in_pane || in_split => {
+                // Already typing into this half (or composing): nothing to do.
+                let here = self.focus == Focus::Pane && self.on_right() == in_split;
+                if !matches!(self.mode, Mode::Normal | Mode::Insert) || (self.mode == Mode::Insert && here) {
                     return;
                 }
-                if self.mode == Mode::Normal {
-                    // Clicking into a chat is like pressing Enter on it.
-                    match self.selected.as_deref() {
-                        Some(id) if id == NEW_CHAT || self.live(id).is_some() => self.open(false),
-                        _ => self.focus = Focus::Pane,
-                    }
+                self.mode = Mode::Normal;
+                self.focus_pane(in_split);
+                // Clicking into a chat is like pressing Enter on it.
+                if self.pane_id().is_some_and(|id| id == NEW_CHAT || self.live(id).is_some()) {
+                    self.open(false);
                 }
             }
             _ => {}
@@ -1603,6 +1798,15 @@ mod tests {
         assert_eq!(next_attention(c(), Some("unseen")).as_deref(), Some("old-wait"));
         assert_eq!(next_attention(c(), Some("elsewhere")).as_deref(), Some("old-wait"));
         assert_eq!(next_attention(vec![], None), None);
+    }
+
+    #[test]
+    fn names_round_trip_and_skip_junk() {
+        let names = parse_names("b\tSecond one\na\t  First \nno tab here\nc\t\n\n");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names["a"], "First");
+        assert_eq!(format_names(&names), "a\tFirst\nb\tSecond one\n");
+        assert_eq!(parse_names(&format_names(&names)), names);
     }
 
     #[test]

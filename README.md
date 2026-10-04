@@ -5,7 +5,7 @@ you've had, grouped by directory, with live Claude sessions running in a pane
 next to the list. Helix-style keys, claude.ai-style new-chat screen.
 
 - Browse and full-text search all past chats from `~/.claude/projects`
-- Resume, fork, pin and archive chats; run several live sessions side by side
+- Resume, fork, rename, pin and archive chats; run several live sessions side by side
 - See at a glance which sessions are working, waiting on you, or done
 - Desktop notifications when a background chat finishes or needs you
 - Adapts to narrow (tiled) windows by showing either the list or the chat
@@ -26,11 +26,11 @@ The chat list (sidebar) is on the left, the pane on the right. The pane shows
 the selected chat: a live Claude session if it's running in cdeck, otherwise a
 read-only preview of its transcript.
 
-Below 100 columns (e.g. a half-width window in a tiling WM) only one of them is
+Below 100 columns (`narrow_width` in the [config](#config); e.g. a half-width window in a tiling WM) only one of them is
 shown at a time: whichever has focus. `Ctrl-\` from a chat brings the list
 back; opening a chat shows it.
 
-Directories with many chats show their 5 newest; `z` expands them.
+Directories with many chats show their 5 newest (`group_limit`); `z` expands them.
 
 ### Token usage
 
@@ -71,6 +71,7 @@ The footer badge shows the current mode.
 | `F` | fork: continue a copy of this chat as a new session |
 | `p` | pin / unpin (pinned chats sit at the top) |
 | `x` | archive / unarchive (hides it; transcript untouched) |
+| `R` | rename: give the chat a name of your own (only cdeck sees it) |
 | `E` | open in its own terminal window |
 | `y` | copy Claude's last reply (works from the pane too) |
 | `Y` | copy the whole chat as Markdown (`## You` / `## Claude`, tool calls as `> ⚙ …`) |
@@ -87,15 +88,38 @@ The footer badge shows the current mode.
 | `space` | menu |
 | `?` | show / hide the key map strip (`space ?` for full help) |
 
+`R` opens the command line prefilled with `rename <current title>` to edit.
+A local name replaces the title everywhere in cdeck (list, pane, notifications,
+search) and is stored in cdeck's own state; `~/.claude` is never written.
+
 ### Focus
 
 | Key | Action |
 |-----|--------|
-| `Ctrl-→` `Ctrl-←` | focus pane / chat list |
+| `Ctrl-→` `Ctrl-←` | focus one step right / left: chat list, pane (left half, right half when split) |
 | `Ctrl-w l` `Ctrl-w h` / `g→` `g←` | same, helix window style |
-| `Ctrl-w w` | swap focus |
+| `Ctrl-w w` | next: chat list → pane → right half → chat list |
+| `Ctrl-w v` | split the pane: keep the selected chat on the right |
+| `Ctrl-w q` `Ctrl-w o` | close the split |
+
+### Split pane
+
+`Ctrl-w v` shows two chats side by side: the chat selected when you pressed it
+stays in the right half, and the left half keeps following the selection, so you
+can watch one chat while browsing or typing in others. `Ctrl-w v` again moves
+the right half to the current selection.
+
+Each half takes focus on its own (`Ctrl-w l` / `Ctrl-w h` / `Ctrl-w w`; the
+focused half's rule under the title lights up). Pane keys, `Enter`, typing,
+paste and `d` act on the focused half's chat; list keys like `p`, `x`, `F`, `R`
+still act on the selection. Narrow windows (below `narrow_width`)
+never split; shrinking one closes the split. While split, every live session is
+sized to half the pane (both halves are the same width), and back to the full
+pane when the split closes.
 
 ### Pane focused (transcript preview or live session, not typing)
+
+When split, these act on whichever half has focus.
 
 | Key | Action |
 |-----|--------|
@@ -156,7 +180,8 @@ The footer badge shows the current mode.
 |--------|--------|
 | wheel on list | next / previous chat |
 | click | select; click the selected chat again to open it |
-| wheel on pane | scroll |
+| click on pane | focus it (that half, when split); a live chat starts typing |
+| wheel on pane | scroll (each half of a split scrolls on its own) |
 | `Shift`-drag | select text natively (most terminals), or turn capture off with `M` |
 
 ## Search
@@ -192,6 +217,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:pin` | pin / unpin the selected chat |
 | `:archive` | archive / unarchive the selected chat |
 | `:archived` | show / hide archived chats |
+| `:rename [name]` | name the selected chat locally; no name goes back to Claude's title |
 | `:win` / `:win!` | open in its own terminal window (`!`: even if it's running) |
 | `:live` | toggle live-only view |
 | `:notify` | desktop notifications on / off |
@@ -201,6 +227,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:copy` / `:copy all` | copy Claude's last reply / the whole chat, like `y` / `Y` |
 | `:refresh` / `:r` | rescan transcripts |
 | `:help` / `:h` | full help |
+| `:config` | show the config file's path, and whether it exists |
 | `:q` / `:q!` | quit / quit and kill live instances (transcripts are kept) |
 
 ## Status glyphs
@@ -255,17 +282,39 @@ while it's off.
 ## Own terminal window (`E`)
 
 Opens `claude --resume <id>` in the chat's directory in a new terminal window.
-Uses `$TERMINAL` if set, otherwise the first of `kitty`, `foot`, `alacritty`,
+Uses `terminal` from the [config](#config) if set, then `$TERMINAL`, otherwise the first of `kitty`, `foot`, `alacritty`,
 `wezterm`, `ghostty`, `xterm` found on `$PATH`.
+
+## Config
+
+Optional, at `$XDG_CONFIG_HOME/cdeck/config.toml` (default
+`~/.config/cdeck/config.toml`). Read once at startup; every key is optional and
+unknown keys are ignored. If the file doesn't parse, cdeck says so in the footer
+and uses the defaults. `:config` shows where it looks.
+
+```toml
+# Below this many columns, show either the chat list or the chat, not both.
+narrow_width = 100
+
+# Chats listed per directory before the rest fold behind "… n more" (z).
+group_limit = 5
+
+# Terminal for E / :win, with any flags; overrides $TERMINAL.
+terminal = "kitty --single-instance"
+
+# Fixed chat-list width in columns. Unset: a quarter of the window, 30–48.
+sidebar_width = 40
+```
 
 ## Files and environment
 
 | Path / variable | Purpose |
 |-----------------|---------|
 | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | where transcripts and session status are read from — never written |
-| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `bell-off`, `mouse-off` |
+| `$XDG_CONFIG_HOME/cdeck/config.toml` (default `~/.config/cdeck/`) | settings, see [Config](#config) |
+| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), `names` (`id<TAB>name` per line), and flag files `keymap-hidden`, `notify-off`, `bell-off`, `mouse-off` |
 | `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed titles and token usage, so startup doesn't reread every transcript; safe to delete |
-| `$TERMINAL` | terminal used by `E` / `:win` |
+| `$TERMINAL` | terminal used by `E` / `:win`, unless the config sets `terminal` |
 | `$CDECK_CLAUDE` | program to run instead of `claude` (testing) |
 
 ## Development
