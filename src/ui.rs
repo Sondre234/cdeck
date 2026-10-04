@@ -719,10 +719,15 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
         let mut lines: Vec<Line<'static>> = Vec::new();
         let mut owners: Vec<Option<usize>> = Vec::new();
         let mut after_user = true;
+        let now = chrono::Local::now().naive_local();
         for (ei, e) in entries.iter().enumerate() {
             match e {
                 Entry::User(t) => {
-                    lines.push(Line::from(""));
+                    // When it was sent, above the bubble; not part of the
+                    // message as far as search is concerned.
+                    let at = t.at.map(|at| stamp(at.with_timezone(&chrono::Local).naive_local(), now)).unwrap_or_default();
+                    lines.push(Line::from(vec![Span::raw(margin.clone()), Span::styled(format!("     {at}"), Style::new().fg(th().faint))]));
+                    owners.resize(lines.len(), None);
                     let bubble_w = cw.saturating_sub(6).min(t.lines().map(|l| l.width()).max().unwrap_or(0) + 2).max(4);
                     let wrapped: Vec<String> = t.lines().flat_map(|l| wrap(l, bubble_w - 2)).collect();
                     for (i, l) in wrapped.iter().enumerate() {
@@ -798,6 +803,19 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
         .map(|i| if searching && owners[i].is_some() { highlight(&lines[i], q) } else { lines[i].clone() })
         .collect::<Vec<_>>();
     f.render_widget(Paragraph::new(visible), area);
+}
+
+/// Local send time, as short as stays unambiguous: `14:32` today,
+/// `Mon 14:32` this past week, `3 Oct` this year, `3 Oct 2025` before.
+fn stamp(t: chrono::NaiveDateTime, now: chrono::NaiveDateTime) -> String {
+    use chrono::Datelike;
+    let fmt = match (now.date() - t.date()).num_days() {
+        0 => "%H:%M",
+        1..7 => "%a %H:%M",
+        _ if t.year() == now.year() => "%-d %b",
+        _ => "%-d %b %Y",
+    };
+    t.format(fmt).to_string()
 }
 
 /// Mark every case-insensitive occurrence of `needle` (lowercase) in the
@@ -915,6 +933,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     if app.live_only {
         right = format!("live-only · {right}");
     }
+    if !app.mouse {
+        right = format!("mouse off · {right}");
+    }
+    if !app.notify {
+        right = format!("quiet · {right}");
+    }
     // Messages and hints give way to the counters on narrow terminals.
     let room = (area.width as usize).saturating_sub(badge.len() + 3 + right.width());
     if let Some(last) = spans.last_mut().filter(|_| app.mode != Mode::Command && app.mode != Mode::Search) {
@@ -965,6 +989,7 @@ fn draw_help(f: &mut Frame) {
                 ("O", "new chat, pick the directory first"),
                 ("d", "kill live instance"),
                 ("z", "expand / fold a directory"),
+                ("M", "mouse capture off / on, for native selection"),
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
@@ -990,7 +1015,7 @@ fn draw_help(f: &mut Frame) {
                 ("wheel on list", "next / previous chat"),
                 ("click", "select · click again to open"),
                 ("wheel on pane", "scroll the pane"),
-                ("Shift-drag", "select text (terminal's own)"),
+                ("Shift-drag", "select text natively (most terminals)"),
             ],
         ),
         (
@@ -1000,6 +1025,8 @@ fn draw_help(f: &mut Frame) {
                 (":open [dir]", "start claude there, no prompt (fuzzy too)"),
                 (":kill  :live", "kill instance / live-only view"),
                 (":resume!", "resume even if running elsewhere"),
+                (":notify", "desktop notifications on / off"),
+                (":mouse", "mouse capture off / on, like M"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
         ),
@@ -1087,6 +1114,8 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("q / q!", "quit / force"),
                 ("Tab", "complete dir"),
                 ("⏎ / Esc", "run / cancel"),
+                ("notify", "notifications on/off"),
+                ("mouse", "mouse capture on/off"),
             ],
         ),
         (Mode::Search, _) => (
@@ -1145,6 +1174,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("n", "new chat"),
                 ("d", "kill"),
                 ("space", "menu…"),
+                ("M", "mouse on/off"),
                 ("?", "hide this map"),
             ],
         ),
@@ -1164,6 +1194,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("/", "search"),
                 ("space", "menu…"),
                 ("g  Ctrl-w", "goto… window…"),
+                ("M", "mouse on/off"),
                 (":", "command…"),
                 (":q", "quit"),
                 ("?", "hide this map"),
@@ -1205,4 +1236,20 @@ fn draw_keymap(f: &mut Frame, app: &App, area: Rect) {
         lines.push(Line::from(spans));
     }
     f.render_widget(Paragraph::new(lines), area);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stamps_get_coarser_with_age() {
+        let at = |s: &str| chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M").unwrap();
+        let now = at("2026-10-04 15:00");
+        assert_eq!(stamp(at("2026-10-04 09:05"), now), "09:05");
+        assert_eq!(stamp(at("2026-10-03 23:59"), now), "Sat 23:59");
+        assert_eq!(stamp(at("2026-09-28 14:32"), now), "Mon 14:32");
+        assert_eq!(stamp(at("2026-09-27 14:32"), now), "27 Sep");
+        assert_eq!(stamp(at("2025-12-31 14:32"), now), "31 Dec 2025");
+    }
 }
