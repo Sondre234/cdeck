@@ -1230,6 +1230,11 @@ impl App {
             self.info("session exited");
             self.rebuild();
         }
+        // A brand-new chat that exited before writing a transcript leaves
+        // nothing for the right half to show.
+        if self.split.as_deref().is_some_and(|id| self.find_item(id).is_none()) {
+            self.unsplit();
+        }
         let sel = self.selected.clone();
         let focused = self.pane_id().map(String::from);
         let ids: Vec<String> = self.lives.iter().map(|l| l.id.clone()).collect();
