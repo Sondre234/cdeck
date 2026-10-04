@@ -169,7 +169,13 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         Mode::Window => popup(
             f,
             "window",
-            &[("←", "focus chat list"), ("→", "focus right pane"), ("w", "swap focus"), ("v", "split: keep this chat on the right"), ("q o", "close the split")],
+            &[
+                ("←", "focus left: list, left half"),
+                ("→", "focus right: pane, right half"),
+                ("w", "next: list, pane, right half"),
+                ("v", "split: keep this chat on the right"),
+                ("q o", "close the split"),
+            ],
         ),
         Mode::Goto => popup(
             f,
@@ -436,14 +442,16 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect, id: Option<String>, in_sp
     spans.push(Span::styled("  ·  ", Style::new().fg(th().border)));
     spans.push(Span::styled(title, Style::new().fg(Color::Reset).bold()));
     pad_to(&mut spans, w, right);
-    let rule = Line::from(Span::styled("─".repeat(w), Style::new().fg(th().border)));
+    // Split: the focused half's rule takes the chat's colour.
+    let lit = app.split.is_some() && app.focus == Focus::Pane && in_split == app.on_right();
+    let rule = Line::from(Span::styled("─".repeat(w), Style::new().fg(if lit { c } else { th().border })));
     f.render_widget(Paragraph::new(vec![Line::from(spans), rule]), head);
 
     if let Some(l) = app.live(&item.id) {
         let p = l.parser.lock().unwrap();
         let screen = p.screen();
         render_screen(screen, body, f.buffer_mut());
-        if app.mode == Mode::Insert && !screen.hide_cursor() && screen.scrollback() == 0 {
+        if app.mode == Mode::Insert && in_split == app.on_right() && !screen.hide_cursor() && screen.scrollback() == 0 {
             let (r, col) = screen.cursor_position();
             f.set_cursor_position(Position::new(body.x + col, body.y + r));
         }
@@ -1069,7 +1077,7 @@ fn draw_help(f: &mut Frame) {
                 ("M", "mouse capture off / on, for native selection"),
                 ("Ctrl-l", "redraw the screen if it looks broken"),
                 ("Tab S-Tab", "cycle live chats"),
-                ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
+                ("Ctrl-→ Ctrl-←", "focus right / left (list, pane, split)"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
                 ("Ctrl-w v", "split: keep this chat on the right"),
                 ("Ctrl-w q", "close the split (also Ctrl-w o)"),
@@ -1266,7 +1274,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
         ),
         (Mode::Window, _) => (
             "Ctrl-w",
-            &[("←", "focus list"), ("→", "focus pane"), ("w", "swap focus"), ("v", "split pane"), ("q o", "close split")],
+            &[("←", "focus left"), ("→", "focus right"), ("w", "next pane"), ("v", "split pane"), ("q o", "close split")],
         ),
         (Mode::Normal, Focus::Pane) if app.has_matches() => (
             "pane · search matches",

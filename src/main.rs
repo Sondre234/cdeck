@@ -113,6 +113,8 @@ pub struct App {
     /// half keeps following the selection.
     pub split: Option<String>,
     pub split_view: SplitView,
+    /// With the pane focused: the right half has it rather than the left.
+    pub split_focus: bool,
     /// Below `narrow_width`: list and pane take turns, and nothing splits.
     pub narrow: bool,
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
@@ -172,6 +174,7 @@ impl App {
             help: false,
             split: None,
             split_view: Default::default(),
+            split_focus: false,
             narrow: false,
             keymap: !state_file("keymap-hidden").exists(),
             pinned: load_ids("pinned"),
@@ -220,6 +223,17 @@ impl App {
     /// A local name wins over whatever Claude called the chat.
     fn title_of(&self, s: &data::Session) -> String {
         self.names.get(&s.id).cloned().unwrap_or_else(|| s.title().into())
+    }
+
+    /// Focus is on the split's right half.
+    pub fn on_right(&self) -> bool {
+        self.focus == Focus::Pane && self.split_focus && self.split.is_some()
+    }
+
+    /// The chat that pane keys, typing and Enter act on: the right half's
+    /// when it has focus, else the selection.
+    pub fn pane_id(&self) -> Option<&str> {
+        if self.on_right() { self.split.as_deref() } else { self.selected.as_deref() }
     }
 
     /// A chat's list entry, or one made up for a chat the list currently
@@ -374,6 +388,7 @@ impl App {
         self.picker = None;
         self.select(Some(NEW_CHAT.into()));
         self.focus = Focus::Pane;
+        self.split_focus = false;
         self.mode = Mode::Compose;
     }
 
@@ -539,13 +554,18 @@ impl App {
         if !cwd.is_dir() {
             return self.error(&format!("{} does not exist", data::tilde(cwd)));
         }
+        // Resuming the right half's chat keeps it there instead of selecting it.
+        let right = self.on_right() && self.split.as_deref() == Some(id);
         match Live::spawn(id, cwd, &args, self.pane) {
             Ok(l) => {
                 self.lives.push(l);
                 self.rebuild();
-                self.select(Some(id.into()));
+                if !right {
+                    self.select(Some(id.into()));
+                }
                 self.mode = Mode::Insert;
                 self.focus = Focus::Pane;
+                self.split_focus = right;
                 self.msg = None;
             }
             Err(e) => self.error(&format!("spawn failed: {e}")),
@@ -558,15 +578,18 @@ impl App {
     }
 
     fn open(&mut self, force: bool) {
-        if self.selected.as_deref() == Some(NEW_CHAT) {
+        let right = self.on_right();
+        let Some(id) = self.pane_id().map(String::from) else { return };
+        if id == NEW_CHAT {
             return self.start_compose(self.selected_dir());
         }
-        let Some(item) = self.selected_item().cloned() else { return };
+        let Some(item) = self.find_item(&id) else { return };
         if let Some(l) = self.live_mut(&item.id) {
             l.reset_scroll();
             l.unseen = false;
             self.mode = Mode::Insert;
             self.focus = Focus::Pane;
+            self.split_focus = right;
             return;
         }
         if let Some(r) = self.running.get(&item.id) {
@@ -697,7 +720,7 @@ impl App {
     }
 
     fn kill_selected(&mut self) {
-        let Some(id) = self.selected.clone() else { return };
+        let Some(id) = self.pane_id().map(String::from) else { return };
         if let Some(pos) = self.lives.iter().position(|l| l.id == id) {
             self.lives.remove(pos);
             self.info("killed — transcript kept, Enter resumes it");
@@ -708,29 +731,53 @@ impl App {
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
+        self.scroll_in(self.on_right(), up, amount);
+    }
+
+    /// Scroll the left half (the selection) or the split's right half.
+    fn scroll_in(&mut self, right: bool, up: bool, amount: usize) {
         self.jump_to_match = None;
-        let id = self.selected.clone().unwrap_or_default();
+        let id = if right { self.split.clone() } else { self.selected.clone() }.unwrap_or_default();
         if let Some(l) = self.live(&id) {
-            l.scroll(if up { amount as isize } else { -(amount as isize) });
-        } else if up {
+            return l.scroll(if up { amount as isize } else { -(amount as isize) });
+        }
+        if right {
+            ui::swap_split_view(self);
+        }
+        if up {
             self.preview_scroll += amount;
         } else {
             self.preview_scroll = self.preview_scroll.saturating_sub(amount);
         }
+        if right {
+            ui::swap_split_view(self);
+        }
     }
 
-    /// The selected chat's transcript preview has search matches to step through.
+    /// The focused chat's transcript preview has search matches to step through.
     pub fn has_matches(&self) -> bool {
-        self.selected.as_deref().is_some_and(|id| self.live(id).is_none() && self.search.hits.contains_key(id))
+        self.pane_id().is_some_and(|id| self.live(id).is_none() && self.search.hits.contains_key(id))
     }
 
     /// n/N: step through search matches in a transcript preview, wrapping.
     /// False when the chat has no hits, so the key keeps its usual meaning.
     fn step_match(&mut self, forward: bool) -> bool {
+        let right = self.on_right();
+        if right {
+            ui::swap_split_view(self);
+        }
+        let stepped = self.step_match_here(forward);
+        if right {
+            ui::swap_split_view(self);
+        }
+        stepped
+    }
+
+    fn step_match_here(&mut self, forward: bool) -> bool {
         if !self.has_matches() {
             return false;
         }
-        let id = self.selected.clone().unwrap_or_default();
+        let id = self.pane_id().unwrap_or_default().to_string();
         let Some((_, _, _, lines, owners)) = self.wrapped.as_ref().filter(|w| w.0 == id) else { return false };
         let (len, ms) = (lines.len(), ui::match_lines(lines, owners, &self.search.query));
         if ms.is_empty() {
@@ -844,19 +891,39 @@ impl App {
         }
         let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to split off") };
         self.split = Some(id);
+        // Already looking at it: focus follows it to the right.
+        self.split_focus = self.focus == Focus::Pane;
         self.info("split · the right half keeps this chat, the left follows the selection · Ctrl-w q closes");
     }
 
     fn unsplit(&mut self) {
         self.split = None;
         self.split_view = Default::default();
+        self.split_focus = false;
     }
 
+    /// Ctrl-w w: list → pane (→ right half when split) → list.
     fn toggle_focus(&mut self) {
-        self.focus = match self.focus {
-            Focus::Sidebar => Focus::Pane,
-            Focus::Pane => Focus::Sidebar,
-        };
+        match (self.focus, self.split.is_some() && !self.split_focus) {
+            (Focus::Sidebar, _) => self.focus_pane(false),
+            (Focus::Pane, true) => self.split_focus = true,
+            (Focus::Pane, false) => self.focus = Focus::Sidebar,
+        }
+    }
+
+    fn focus_pane(&mut self, right: bool) {
+        self.focus = Focus::Pane;
+        self.split_focus = right && self.split.is_some();
+    }
+
+    /// Ctrl-w l / h: one step right or left along list, left half, right half.
+    fn focus_step(&mut self, right: bool) {
+        match (self.focus, right) {
+            (Focus::Sidebar, true) => self.focus_pane(false),
+            (Focus::Pane, true) => self.focus_pane(true),
+            (Focus::Pane, false) if self.on_right() => self.split_focus = false,
+            (_, false) => self.focus = Focus::Sidebar,
+        }
     }
 
     fn refresh(&mut self) {
@@ -952,7 +1019,7 @@ impl App {
                     self.focus = Focus::Sidebar;
                     return;
                 }
-                let id = self.selected.clone().unwrap_or_default();
+                let id = self.pane_id().unwrap_or_default().to_string();
                 match self.live(&id) {
                     Some(l) => {
                         l.reset_scroll();
@@ -1035,8 +1102,8 @@ impl App {
                     KeyCode::Char('e') => self.move_by(isize::MAX / 2),
                     KeyCode::Char('n') => self.jump_group(true),
                     KeyCode::Char('p') => self.jump_group(false),
-                    KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
-                    KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Pane,
+                    KeyCode::Left | KeyCode::Char('h') => self.focus_step(false),
+                    KeyCode::Right | KeyCode::Char('l') => self.focus_step(true),
                     _ => {}
                 }
             }
@@ -1044,8 +1111,8 @@ impl App {
             Mode::Window => {
                 self.mode = Mode::Normal;
                 match k.code {
-                    KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
-                    KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Pane,
+                    KeyCode::Left | KeyCode::Char('h') => self.focus_step(false),
+                    KeyCode::Right | KeyCode::Char('l') => self.focus_step(true),
                     KeyCode::Char('w') => self.toggle_focus(),
                     KeyCode::Char('v') => self.split_pane(),
                     KeyCode::Char('q') | KeyCode::Char('o') => self.unsplit(),
@@ -1057,8 +1124,8 @@ impl App {
                 let half = (self.pane.0 / 2).max(1) as usize;
                 // Focus changes work from either side.
                 match k.code {
-                    KeyCode::Left if ctrl => return self.focus = Focus::Sidebar,
-                    KeyCode::Right if ctrl => return self.focus = Focus::Pane,
+                    KeyCode::Left if ctrl => return self.focus_step(false),
+                    KeyCode::Right if ctrl => return self.focus_step(true),
                     KeyCode::Char('w') if ctrl => return self.mode = Mode::Window,
                     KeyCode::Char('n') if ctrl => return self.start_compose(self.selected_dir()),
                     KeyCode::Char('l') if ctrl => return self.repaint = true,
@@ -1131,7 +1198,7 @@ impl App {
     fn on_paste(&mut self, s: &str) {
         match self.mode {
             Mode::Insert => {
-                if let Some(l) = self.selected.as_deref().and_then(|id| self.live(id)) {
+                if let Some(l) = self.pane_id().and_then(|id| self.live(id)) {
                     l.paste(s);
                 }
             }
@@ -1157,13 +1224,14 @@ impl App {
         let before = self.lives.len();
         self.lives.retain_mut(|l| !l.reap());
         if self.lives.len() != before {
-            if self.mode == Mode::Insert && self.selected.as_deref().is_some_and(|id| self.live(id).is_none()) {
+            if self.mode == Mode::Insert && self.pane_id().is_some_and(|id| self.live(id).is_none()) {
                 self.mode = Mode::Normal;
             }
             self.info("session exited");
             self.rebuild();
         }
         let sel = self.selected.clone();
+        let focused = self.pane_id().map(String::from);
         let ids: Vec<String> = self.lives.iter().map(|l| l.id.clone()).collect();
         for id in ids {
             let (now, waiting_for) = match self.status(&id) {
@@ -1173,16 +1241,17 @@ impl App {
             };
             let trusted = self.running.contains_key(&id);
             let was = self.phase.insert(id.clone(), (now, trusted));
-            let selected = sel.as_deref() == Some(id.as_str());
+            // On screen in either half counts as seen.
+            let selected = sel.as_deref() == Some(id.as_str()) || self.split.as_deref() == Some(id.as_str());
             if was.is_some_and(|w| w.0 == Phase::Busy) && now != Phase::Busy && !selected {
                 if let Some(l) = self.live_mut(&id) {
                     l.unseen = true;
                 }
             }
-            // A selected chat only counts as watched while its pane has focus.
+            // A chat only counts as watched while its pane (half) has focus.
             // Only Claude's own status file is trusted: the output-activity
             // fallback flickers (redraws, resizes) and would spam.
-            let watching = selected && self.focus == Focus::Pane;
+            let watching = focused.as_deref() == Some(id.as_str()) && self.focus == Focus::Pane;
             let was = was.filter(|w| w.1 && trusted).map(|w| w.0);
             if let Some(what) = noteworthy(was, now).filter(|_| self.notify && !watching) {
                 let what = match what {

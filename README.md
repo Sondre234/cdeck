@@ -83,9 +83,9 @@ search) and is stored in cdeck's own state; `~/.claude` is never written.
 
 | Key | Action |
 |-----|--------|
-| `Ctrl-→` `Ctrl-←` | focus pane / chat list |
+| `Ctrl-→` `Ctrl-←` | focus one step right / left: chat list, pane (left half, right half when split) |
 | `Ctrl-w l` `Ctrl-w h` / `g→` `g←` | same, helix window style |
-| `Ctrl-w w` | swap focus |
+| `Ctrl-w w` | next: chat list → pane → right half → chat list |
 | `Ctrl-w v` | split the pane: keep the selected chat on the right |
 | `Ctrl-w q` `Ctrl-w o` | close the split |
 
@@ -94,12 +94,19 @@ search) and is stored in cdeck's own state; `~/.claude` is never written.
 `Ctrl-w v` shows two chats side by side: the chat selected when you pressed it
 stays in the right half, and the left half keeps following the selection, so you
 can watch one chat while browsing or typing in others. `Ctrl-w v` again moves
-the right half to the current selection. Narrow windows (below `narrow_width`)
+the right half to the current selection.
+
+Each half takes focus on its own (`Ctrl-w l` / `Ctrl-w h` / `Ctrl-w w`; the
+focused half's rule under the title lights up). Pane keys, `Enter`, typing,
+paste and `d` act on the focused half's chat; list keys like `p`, `x`, `F`, `R`
+still act on the selection. Narrow windows (below `narrow_width`)
 never split; shrinking one closes the split. While split, every live session is
 sized to half the pane (both halves are the same width), and back to the full
 pane when the split closes.
 
 ### Pane focused (transcript preview or live session, not typing)
+
+When split, these act on whichever half has focus.
 
 | Key | Action |
 |-----|--------|
