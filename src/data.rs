@@ -427,8 +427,20 @@ pub fn running() -> HashMap<String, Running> {
 pub enum Entry {
     User(Msg),
     Assistant(Msg),
-    Tool(String),
+    Tool(Tool),
 }
+
+/// A tool call, `Name(arg)`, and the start of what it returned.
+pub struct Tool {
+    pub call: String,
+    id: String,
+    /// First lines of the result and how many more there were; None until
+    /// the result's line has been read.
+    pub result: Option<(Vec<String>, usize)>,
+}
+
+/// Lines of a tool result kept for the preview; the rest are only counted.
+pub const RESULT_LINES: usize = 6;
 
 /// A message and when it was sent. Derefs to the text, so code that only
 /// cares about the words can treat it as a `str`.
@@ -468,6 +480,17 @@ fn line_entries(line: &str, out: &mut Vec<Entry>) {
     let msg = |text: String| Msg { text, at };
     match v["type"].as_str() {
         Some("user") => {
+            // Results answer calls from the line(s) before; attach them there.
+            for b in content.as_array().into_iter().flatten().filter(|b| b["type"] == "tool_result") {
+                let id = b["tool_use_id"].as_str().unwrap_or("");
+                let call = out.iter_mut().rev().take(64).find_map(|e| match e {
+                    Entry::Tool(t) if t.id == id => Some(t),
+                    _ => None,
+                });
+                if let Some(t) = call {
+                    t.result = Some(result_head(&b["content"]));
+                }
+            }
             if let Some(t) = user_text(content) {
                 if let Some(cmd) = between(&t, "<command-name>", "</command-name>") {
                     out.push(Entry::User(msg(cmd.into())));
@@ -492,7 +515,8 @@ fn line_entries(line: &str, out: &mut Vec<Entry>) {
                             .find_map(|k| i[k].as_str())
                             .map(one_line)
                             .unwrap_or_default();
-                        out.push(Entry::Tool(format!("{name}({arg})")));
+                        let id = b["id"].as_str().unwrap_or("").into();
+                        out.push(Entry::Tool(Tool { call: format!("{name}({arg})"), id, result: None }));
                     }
                     _ => {}
                 }
@@ -500,6 +524,25 @@ fn line_entries(line: &str, out: &mut Vec<Entry>) {
         }
         _ => {}
     }
+}
+
+/// The first `RESULT_LINES` lines of a tool result (text, or a marker for
+/// images) and how many were left out.
+fn result_head(content: &Value) -> (Vec<String>, usize) {
+    let text = match content {
+        Value::String(s) => s.clone(),
+        Value::Array(a) => a
+            .iter()
+            .map(|b| b["text"].as_str().map(String::from).unwrap_or_else(|| format!("[{}]", b["type"].as_str().unwrap_or("?"))))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    };
+    let text = text.trim_end();
+    let total = text.lines().count();
+    // Tabs (numbered file listings) and other controls would garble the screen.
+    let clean = |l: &str| l.replace('\t', "    ").chars().filter(|c| !c.is_control()).collect();
+    (text.lines().take(RESULT_LINES).map(clean).collect(), total.saturating_sub(RESULT_LINES))
 }
 
 /// First user/assistant message in a transcript containing `needle`
@@ -632,6 +675,19 @@ mod tests {
         let [Entry::User(a), Entry::User(b)] = &out[..] else { panic!() };
         assert_eq!(a.at.map(|t| t.timestamp()), Some(1_791_140_089));
         assert_eq!((&**a, b.at), ("hi", None));
+    }
+
+    #[test]
+    fn tool_results_attach_to_their_call() {
+        let mut out = Vec::new();
+        line_entries(r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"t1","name":"Bash","input":{"command":"ls"}},{"type":"tool_use","id":"t2","name":"Read","input":{"file_path":"/x"}}]}}"#, &mut out);
+        line_entries(r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"t2","content":[{"type":"text","text":"a\tb"},{"type":"image"}]}]}}"#, &mut out);
+        let long = (1..=10).map(|i| i.to_string()).collect::<Vec<_>>().join("\\n");
+        line_entries(&format!(r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"t1","content":"{long}\n"}}]}}}}"#), &mut out);
+        let [Entry::Tool(a), Entry::Tool(b)] = &out[..] else { panic!() };
+        assert_eq!(a.call, "Bash(ls)");
+        assert_eq!(a.result, Some(((1..=6).map(|i| i.to_string()).collect(), 4)));
+        assert_eq!(b.result, Some((vec!["a    b".into(), "[image]".into()], 0)));
     }
 
     #[test]

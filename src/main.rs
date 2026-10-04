@@ -101,6 +101,11 @@ pub struct App {
     pub hits: Hits,
     expanded: std::collections::HashSet<PathBuf>,
     pub preview_scroll: usize,
+    /// Tool results under each call in transcript previews (`t`).
+    pub show_tools: bool,
+    /// Message line to keep at the same screen row once the preview is
+    /// re-wrapped (entry, line within it, row), so toggling doesn't jump.
+    pub hold: Option<(usize, usize, usize)>,
     pub pane: (u16, u16),
     pub help: bool,
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
@@ -154,6 +159,8 @@ impl App {
             hits: Hits::default(),
             expanded: Default::default(),
             preview_scroll: 0,
+            show_tools: false,
+            hold: None,
             pane: (24, 80),
             help: false,
             keymap: !state_file("keymap-hidden").exists(),
@@ -654,6 +661,21 @@ impl App {
         }
     }
 
+    fn toggle_tools(&mut self) {
+        self.show_tools = !self.show_tools;
+        let id = self.selected.clone().unwrap_or_default();
+        if let Some((_, _, _, lines, owners)) = self.wrapped.as_ref().filter(|w| w.0 == id) {
+            let start = lines.len().saturating_sub(self.preview_scroll + self.pane.0 as usize);
+            self.hold = ui::anchor(owners, start);
+        }
+        self.wrapped = None;
+        self.info(match (self.show_tools, self.live(&id).is_some()) {
+            (true, true) => "tool output on · shows in transcript previews, not live chats",
+            (true, false) => "tool output on · t hides it",
+            (false, _) => "tool output hidden",
+        });
+    }
+
     /// The selected chat's transcript preview has search matches to step through.
     pub fn has_matches(&self) -> bool {
         self.selected.as_deref().is_some_and(|id| self.live(id).is_none() && self.search.hits.contains_key(id))
@@ -737,6 +759,7 @@ impl App {
             }
             "notify" => self.toggle_notify(),
             "mouse" => self.toggle_mouse(),
+            "tools" => self.toggle_tools(),
             "h" | "help" => self.help = true,
             _ => self.error(&format!("unknown command: {cmd}")),
         }
@@ -986,6 +1009,7 @@ impl App {
                         KeyCode::Left | KeyCode::Esc => return self.focus = Focus::Sidebar,
                         KeyCode::Char('n') if self.step_match(true) => return,
                         KeyCode::Char('N') if self.step_match(false) => return,
+                        KeyCode::Char('t') => return self.toggle_tools(),
                         _ => {}
                     }
                 }

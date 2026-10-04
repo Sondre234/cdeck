@@ -99,6 +99,7 @@ The footer badge shows the current mode.
 | `PageDown` `PageUp` | scroll a page |
 | `Home` `End` | top / bottom |
 | `n` `N` | next / previous search match (when the chat matched a search) |
+| `t` | show / hide tool output in transcript previews (first 6 lines of each result, under its call) |
 | `Enter` | start typing into Claude |
 | `←` `Esc` | back to the chat list |
 
@@ -186,6 +187,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:live` | toggle live-only view |
 | `:notify` | desktop notifications on / off |
 | `:mouse` | mouse capture on / off |
+| `:tools` | tool output in transcript previews on / off, like `t` |
 | `:refresh` / `:r` | rescan transcripts |
 | `:help` / `:h` | full help |
 | `:q` / `:q!` | quit / quit and kill live instances (transcripts are kept) |

@@ -812,8 +812,22 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
                     lines.push(Line::from(vec![
                         Span::raw(margin.clone()),
                         Span::styled(lead, Style::new().fg(th().accent).bold()),
-                        Span::styled(format!("⚙ {}", trunc(t, cw.saturating_sub(6))), Style::new().fg(th().faint)),
+                        Span::styled(format!("⚙ {}", trunc(&t.call, cw.saturating_sub(6))), Style::new().fg(th().faint)),
                     ]));
+                    // `t` shows what the call returned, under it, like Claude Code's ⎿.
+                    if let Some((head, more)) = t.result.as_ref().filter(|_| app.show_tools) {
+                        let dim = Style::new().fg(th().faint).add_modifier(Modifier::DIM);
+                        let more = (*more > 0).then(|| format!("… {more} more line{}", if *more == 1 { "" } else { "s" }));
+                        let empty = head.is_empty().then(|| "(no output)".to_string());
+                        for (i, l) in head.iter().chain(&more).chain(&empty).enumerate() {
+                            lines.push(Line::from(vec![
+                                Span::raw(margin.clone()),
+                                Span::raw("      "),
+                                Span::styled(if i == 0 { "⎿ " } else { "  " }, dim),
+                                Span::styled(trunc(l, cw.saturating_sub(8)), dim),
+                            ]));
+                        }
+                    }
                     after_user = false;
                 }
             }
@@ -825,6 +839,11 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
     let (_, _, _, lines, owners) = app.wrapped.as_ref().unwrap();
     let h = area.height as usize;
     let max_scroll = lines.len().saturating_sub(h);
+    if let Some((e, off, row)) = app.hold.take() {
+        if let Some(first) = owners.iter().position(|&o| o == Some(e)) {
+            app.preview_scroll = lines.len().saturating_sub(first + off - row.min(first + off) + h);
+        }
+    }
     if app.jump_to_match.as_deref() == Some(id) {
         let q = &app.search.query;
         if app.search.hits.contains_key(id) {
@@ -916,6 +935,15 @@ pub fn match_lines(lines: &[Line], owners: &[Option<usize>], needle: &str) -> Ve
         .collect()
 }
 
+/// The first message line at or below the top of the view, as (entry, line
+/// within it, screen row), so a re-wrap can put it back where it was.
+pub fn anchor(owners: &[Option<usize>], start: usize) -> Option<(usize, usize, usize)> {
+    let i = start + owners.get(start..)?.iter().position(Option::is_some)?;
+    let e = owners[i]?;
+    let first = owners.iter().position(|&o| o == Some(e))?;
+    Some((e, i - first, i - start))
+}
+
 /// First rendered line showing `needle` (lowercase). A match split by
 /// wrapping falls back to the top of its message.
 fn match_line(entries: &[Entry], lines: &[Line], owners: &[Option<usize>], needle: &str) -> Option<usize> {
@@ -963,7 +991,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     (Mode::Insert, _) => "typing into claude · Ctrl-\\ back to chats",
                     (Mode::Compose, _) => "writing a new chat · ⏎ start · Esc back",
                     (_, Focus::Pane) if app.has_matches() => "n/N next/prev match · ↑↓ scroll · ← back to chats",
-                    (_, Focus::Pane) => "↑↓ scroll · shift ↑↓ half page · Home/End · ⏎ type · ← back to chats",
+                    (_, Focus::Pane) => "↑↓ scroll · shift ↑↓ half page · Home/End · t tool output · ⏎ type · ← back to chats",
                     _ => "↑↓ chat · ←→ directory · ⏎ open · n new chat · Ctrl-→ pane · d kill · / search · space menu · ? keys",
                 },
                 hint,
@@ -1063,6 +1091,7 @@ fn draw_help(f: &mut Frame) {
                 ("↑ ↓", "scroll 3 lines (shift: half page)"),
                 ("Home End", "top / bottom"),
                 ("n N", "next / previous search match"),
+                ("t", "show / hide tool output in the preview"),
                 ("⏎", "start typing into claude"),
                 ("← Esc", "back to chat list"),
             ],
@@ -1090,6 +1119,7 @@ fn draw_help(f: &mut Frame) {
                 (":resume!", "resume even if running elsewhere"),
                 (":notify", "desktop notifications on / off"),
                 (":mouse", "mouse capture off / on, like M"),
+                (":tools", "tool output in previews on / off, like t"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
         ),
@@ -1205,6 +1235,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("⏎ / Esc", "run / cancel"),
                 ("notify", "notifications on/off"),
                 ("mouse", "mouse capture on/off"),
+                ("tools", "tool output on/off"),
             ],
         ),
         (Mode::Search, _) => (
@@ -1248,6 +1279,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("↑ ↓", "scroll"),
                 ("Shift-↑↓", "half page"),
                 ("Home End", "top / bottom"),
+                ("t", "tool output"),
                 ("⏎", "type into claude"),
                 ("← Esc", "back to list"),
                 ("Tab", "next live chat"),
@@ -1262,6 +1294,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("↑ ↓", "scroll"),
                 ("Shift-↑↓", "half page"),
                 ("Home End", "top / bottom"),
+                ("t", "tool output"),
                 ("⏎", "type into claude"),
                 ("← Esc", "back to list"),
                 ("Tab", "next live chat"),
@@ -1334,6 +1367,14 @@ fn draw_keymap(f: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn anchor_finds_the_first_message_line_in_view() {
+        let owners = [None, Some(0), Some(0), None, None, Some(3), Some(3)];
+        assert_eq!(anchor(&owners, 2), Some((0, 1, 0)));
+        assert_eq!(anchor(&owners, 3), Some((3, 0, 2)));
+        assert_eq!(anchor(&owners, 7), None);
+    }
 
     #[test]
     fn token_counts_stay_short() {
