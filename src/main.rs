@@ -490,6 +490,20 @@ impl App {
         self.spawn(&item.id, &item.cwd, vec!["--resume".into(), item.id.clone()]);
     }
 
+    /// Branch the selected chat into a new session. Claude picks the fork's id
+    /// unless told, so we choose it up front to track the new instance.
+    fn fork_selected(&mut self) {
+        let Some(item) = self.selected_item().cloned() else { return self.error("select a chat to fork") };
+        if !self.store.sessions.contains_key(&item.id) {
+            return self.error("nothing to fork yet — the chat has no transcript");
+        }
+        let id = data::new_uuid();
+        self.spawn(&id, &item.cwd, fork_args(&item.id, &id));
+        if self.live(&id).is_some() {
+            self.info(&format!("forked from {}", item.title));
+        }
+    }
+
     fn kill_selected(&mut self) {
         let Some(id) = self.selected.clone() else { return };
         if let Some(pos) = self.lives.iter().position(|l| l.id == id) {
@@ -547,6 +561,7 @@ impl App {
                 }
             }
             "k" | "kill" => self.kill_selected(),
+            "fork" => self.fork_selected(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
             "r" | "refresh" => self.refresh(),
             "live" => {
@@ -728,6 +743,7 @@ impl App {
                     KeyCode::Char('n') => self.start_compose(self.selected_dir()),
                     KeyCode::Char('o') => self.new_in(self.selected_dir()),
                     KeyCode::Char('k') => self.kill_selected(),
+                    KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('l') => {
                         self.live_only = !self.live_only;
                         self.rebuild();
@@ -808,6 +824,7 @@ impl App {
                         self.open_picker("");
                     }
                     KeyCode::Char('d') => self.kill_selected(),
+                    KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
                     KeyCode::Char(' ') => self.mode = Mode::Space,
@@ -964,6 +981,11 @@ fn is_leave(k: &KeyEvent) -> bool {
     k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
+/// `--session-id` is only accepted alongside `--resume` when forking.
+fn fork_args(from: &str, new: &str) -> Vec<String> {
+    ["--resume", from, "--fork-session", "--session-id", new].map(String::from).to_vec()
+}
+
 fn keymap_hidden_flag() -> PathBuf {
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| data::home().join(".local/state"));
     state.join("cdeck/keymap-hidden")
@@ -1068,5 +1090,15 @@ impl App {
         } else {
             self.select(Some(id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fork_names_the_new_session() {
+        assert_eq!(fork_args("old", "new"), ["--resume", "old", "--fork-session", "--session-id", "new"]);
     }
 }
