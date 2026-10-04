@@ -863,7 +863,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             None if app.keymap => {}
             None => spans.push(Span::styled(
                 match (app.mode, app.focus) {
-                    (Mode::Insert, _) => "typing into claude · Ctrl-] stop typing",
+                    (Mode::Insert, _) => "typing into claude · Ctrl-\\ back to chats",
                     (Mode::Compose, _) => "writing a new chat · ⏎ start · Esc back",
                     (_, Focus::Pane) => "↑↓ scroll · shift ↑↓ half page · Home/End · ⏎ type · ← back to chats",
                     _ => "↑↓ chat · ←→ directory · ⏎ open · n new chat · Ctrl-→ pane · d kill · / search · space menu · ? keys",
@@ -945,7 +945,7 @@ fn draw_help(f: &mut Frame) {
                 ("← Esc", "back to chat list"),
             ],
         ),
-        ("typing", &[("Ctrl-]", "stop typing (everything else goes to claude)")]),
+        ("typing", &[("Ctrl-\\", "back to chats (everything else goes to claude)")]),
         (
             "mouse",
             &[
@@ -1012,7 +1012,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
     match (app.mode, app.focus) {
         (Mode::Insert, _) => (
             "typing into claude",
-            &[("Ctrl-]", "stop typing"), ("Esc", "interrupt claude"), ("Shift-⏎", "newline (claude)"), ("everything else", "goes to claude")],
+            &[("Ctrl-\\", "back to chats"), ("Esc", "interrupt claude"), ("Shift-⏎", "newline (claude)"), ("everything else", "goes to claude")],
         ),
         (Mode::Compose, _) if app.picker.is_some() => (
             "pick directory",

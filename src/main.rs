@@ -322,7 +322,7 @@ impl App {
         let Some(p) = self.picker.as_mut() else { return };
         match k.code {
             KeyCode::Esc => self.picker = None,
-            KeyCode::Char(']') | KeyCode::Char('5') if ctrl => self.picker = None,
+            _ if is_leave(&k) => self.picker = None,
             KeyCode::Enter => match p.resolve() {
                 Some(d) => {
                     self.compose_dir = std::fs::canonicalize(&d).unwrap_or(d);
@@ -637,7 +637,7 @@ impl App {
                     self.mode = Mode::Normal;
                     self.focus = Focus::Sidebar;
                 }
-                KeyCode::Char(']') | KeyCode::Char('5') if ctrl => {
+                _ if is_leave(&k) => {
                     self.mode = Mode::Normal;
                     self.focus = Focus::Sidebar;
                 }
@@ -658,9 +658,10 @@ impl App {
                 _ => {}
             },
             Mode::Insert => {
-                // Ctrl-] (reported as Ctrl-5 by legacy terminals) returns to normal mode.
-                if ctrl && matches!(k.code, KeyCode::Char(']') | KeyCode::Char('5')) {
+                // Back to the chat list, ready to pick another chat.
+                if is_leave(&k) {
                     self.mode = Mode::Normal;
+                    self.focus = Focus::Sidebar;
                     return;
                 }
                 let id = self.selected.clone().unwrap_or_default();
@@ -948,6 +949,13 @@ fn main() -> std::io::Result<()> {
     let _ = execute!(out, event::DisableBracketedPaste, event::DisableMouseCapture);
     ratatui::restore();
     Ok(())
+}
+
+/// Ctrl-\ stops typing into claude. Claude Code never binds it (it's the
+/// terminal's SIGQUIT key, which raw mode turns off), so it can't clash the
+/// way Ctrl-] (claude's "open artifact") did. Legacy terminals report it as Ctrl-4.
+fn is_leave(k: &KeyEvent) -> bool {
+    k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
 fn keymap_hidden_flag() -> PathBuf {
