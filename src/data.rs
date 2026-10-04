@@ -330,7 +330,8 @@ fn snippet(text: &str, needle: &str) -> Option<String> {
     let at = lower[..lower.find(needle)?].chars().count();
     let chars: Vec<char> = flat.chars().collect();
     let at = at.min(chars.len());
-    let start = at.saturating_sub(30);
+    // Little lead-in: the sidebar is narrow and the match should stay visible.
+    let start = at.saturating_sub(8);
     let end = (at + needle.chars().count() + 80).min(chars.len());
     let mut s: String = chars[start..end].iter().collect();
     if start > 0 {
@@ -399,7 +400,7 @@ mod tests {
         )
         .unwrap();
         let find = |q: &str| find_in_transcript(&file, q, || false);
-        assert_eq!(find("borrow checker").as_deref(), Some("Fixed the Borrow checker error"));
+        assert_eq!(find("borrow checker").as_deref(), Some("…xed the Borrow checker error"));
         assert_eq!(find("toolword"), None);
         assert!(find("café").is_some());
         assert!(find("\"quoted\"").is_some());
