@@ -141,6 +141,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ("f", "search chats"),
                 ("k", "kill instance"),
                 ("F", "fork chat"),
+                ("p", "pin / unpin chat"),
                 ("l", "toggle live-only"),
                 ("r", "rescan"),
                 ("?", "help"),
@@ -224,6 +225,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sel_line = 0;
     let mut group_color = th().faint;
+    let mut in_pins = false;
     let mut line_rows: Vec<Option<usize>> = Vec::new();
     for (i, row) in app.rows.iter().enumerate() {
         let before = lines.len();
@@ -253,7 +255,16 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     lines.push(Line::from(Span::styled(msg, Style::new().fg(th().faint))));
                 }
             }
+            Row::Pinned => {
+                in_pins = true;
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  ★ ", Style::new().fg(th().accent)),
+                    Span::styled("Pinned", Style::new().fg(th().accent).bold()),
+                ]));
+            }
             Row::Header { cwd, count, live } => {
+                in_pins = false;
                 let c = dir_color(cwd);
                 group_color = c;
                 lines.push(Line::from(""));
@@ -286,7 +297,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 let live = app.live(&it.id).is_some();
                 let unseen = matches!(app.status(&it.id), Status::Idle { unseen: true });
                 let age = data::age(it.mtime);
-                let title = trunc(&it.title, w.saturating_sub(8 + age.width()));
+                // Out of its group, a pinned chat names its directory instead.
+                let dir = if in_pins { trunc(&basename(&it.cwd), w / 3) } else { String::new() };
+                let title = trunc(&it.title, w.saturating_sub(8 + age.width() + if in_pins { dir.width() + 1 } else { 0 }));
                 let mut title_style = Style::new().fg(if live || selected { Color::Reset } else { th().muted });
                 if unseen || selected {
                     title_style = title_style.bold();
@@ -297,7 +310,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     Span::raw(" "),
                     Span::styled(title, title_style),
                 ];
-                pad_to(&mut spans, w, vec![Span::styled(format!("{age} "), Style::new().fg(th().faint))]);
+                let mut right = vec![Span::styled(format!("{age} "), Style::new().fg(th().faint))];
+                if in_pins {
+                    right.insert(0, Span::styled(format!("{dir} "), Style::new().fg(c)));
+                }
+                pad_to(&mut spans, w, right);
                 let mut line = Line::from(spans);
                 if selected {
                     sel_line = lines.len();
@@ -957,6 +974,7 @@ fn draw_help(f: &mut Frame) {
                 ("O", "new chat, pick the directory first"),
                 ("d", "kill live instance"),
                 ("F", "fork: continue a copy as a new chat"),
+                ("p", "pin / unpin: keep it at the top"),
                 ("z", "expand / fold a directory"),
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
@@ -990,7 +1008,7 @@ fn draw_help(f: &mut Frame) {
                 (":new [dir]", "new chat; dir can be fuzzy (:new cdeck)"),
                 (":open [dir]", "start claude there, no prompt (fuzzy too)"),
                 (":kill  :live", "kill instance / live-only view"),
-                (":fork", "fork the selected chat"),
+                (":fork  :pin", "fork / pin the selected chat"),
                 (":resume!", "resume even if running elsewhere"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
@@ -1075,6 +1093,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("open [dir]", "start, no prompt"),
                 ("kill", "kill instance"),
                 ("fork", "fork chat"),
+                ("pin", "pin / unpin"),
                 ("live", "live-only view"),
                 ("resume!", "resume anyway"),
                 ("q / q!", "quit / force"),
@@ -1094,6 +1113,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("f", "search"),
                 ("k", "kill instance"),
                 ("F", "fork chat"),
+                ("p", "pin / unpin"),
                 ("l", "live-only"),
                 ("r", "rescan"),
                 ("?", "full help"),
@@ -1130,6 +1150,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("o", "new, no prompt"),
                 ("d", "kill"),
                 ("F", "fork chat"),
+                ("p", "pin / unpin"),
                 ("z", "expand dir"),
                 ("Tab", "next live chat"),
                 ("/", "search"),

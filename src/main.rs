@@ -14,7 +14,7 @@ use crossterm::event::{
 use crossterm::{execute, terminal};
 use data::{Entry, Running, Store};
 use live::Live;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
@@ -43,6 +43,8 @@ pub const NEW_CHAT: &str = "+new";
 
 pub enum Row {
     NewChat,
+    /// Heads the pinned chats, which sit above the directory groups.
+    Pinned,
     Header { cwd: PathBuf, count: usize, live: usize },
     More { hidden: usize },
     Item(Item),
@@ -99,6 +101,7 @@ pub struct App {
     pub help: bool,
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
     pub keymap: bool,
+    pub pinned: HashSet<String>,
     pub tick: usize,
     confirm_resume: Option<String>,
     was_busy: HashMap<String, bool>,
@@ -136,6 +139,7 @@ impl App {
             pane: (24, 80),
             help: false,
             keymap: !keymap_hidden_flag().exists(),
+            pinned: load_ids("pinned"),
             tick: 0,
             confirm_resume: None,
             was_busy: HashMap::new(),
@@ -216,6 +220,8 @@ impl App {
         let f = self.filter.to_lowercase();
         let now = SystemTime::now();
         let mut groups: HashMap<PathBuf, Vec<(SystemTime, Item)>> = HashMap::new();
+        // Pinned chats leave their directory group rather than showing twice.
+        let mut pins: Vec<(SystemTime, Item)> = Vec::new();
         let content = (self.search.query == f).then_some(&self.search.hits);
         for mut it in items.into_values() {
             let active = self.live(&it.id).is_some() || self.running.contains_key(&it.id);
@@ -232,15 +238,25 @@ impl App {
                 }
             }
             let key = if active { now } else { it.mtime.unwrap_or(SystemTime::UNIX_EPOCH) };
-            groups.entry(it.cwd.clone()).or_default().push((key, it));
+            if self.pinned.contains(&it.id) {
+                pins.push((key, it));
+            } else {
+                groups.entry(it.cwd.clone()).or_default().push((key, it));
+            }
         }
+        let newest_first = |a: &(SystemTime, Item), b: &(SystemTime, Item)| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id));
         let mut groups: Vec<_> = groups.into_iter().collect();
         for (_, v) in &mut groups {
-            v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+            v.sort_by(newest_first);
         }
         groups.sort_by(|a, b| b.1[0].0.cmp(&a.1[0].0).then_with(|| a.0.cmp(&b.0)));
+        pins.sort_by(newest_first);
         self.rows.clear();
         self.rows.push(Row::NewChat);
+        if !pins.is_empty() {
+            self.rows.push(Row::Pinned);
+            self.rows.extend(pins.into_iter().map(|(_, i)| Row::Item(i)));
+        }
         for (cwd, v) in groups {
             let live = v.iter().filter(|(_, i)| self.live(&i.id).is_some()).count();
             let count = v.len();
@@ -409,8 +425,13 @@ impl App {
     /// Jump to the first session of the next/previous directory group.
     fn jump_group(&mut self, forward: bool) {
         let Some(cur) = self.selected_row() else { return };
-        let headers: Vec<usize> =
-            self.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Header { .. })).map(|(i, _)| i).collect();
+        let headers: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, Row::Header { .. } | Row::Pinned))
+            .map(|(i, _)| i)
+            .collect();
         let mine = headers.iter().rev().find(|&&h| h < cur).copied().unwrap_or(0);
         let target = if forward {
             headers.iter().find(|&&h| h > cur).copied()
@@ -504,6 +525,19 @@ impl App {
         }
     }
 
+    fn toggle_pin(&mut self) {
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to pin") };
+        let pinned = !self.pinned.remove(&id);
+        if pinned {
+            self.pinned.insert(id);
+        }
+        self.rebuild();
+        match save_ids("pinned", &self.pinned) {
+            Err(e) => self.error(&format!("couldn't save pins: {e}")),
+            Ok(()) => self.info(if pinned { "pinned · p again unpins" } else { "unpinned" }),
+        }
+    }
+
     fn kill_selected(&mut self) {
         let Some(id) = self.selected.clone() else { return };
         if let Some(pos) = self.lives.iter().position(|l| l.id == id) {
@@ -562,6 +596,7 @@ impl App {
             }
             "k" | "kill" => self.kill_selected(),
             "fork" => self.fork_selected(),
+            "pin" => self.toggle_pin(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
             "r" | "refresh" => self.refresh(),
             "live" => {
@@ -579,13 +614,18 @@ impl App {
         if !self.expanded.remove(&cwd) {
             self.expanded.insert(cwd.clone());
         } else {
-            // Folding may hide the selection; land on the group's newest session.
+            // Folding may hide the selection; land on the group's newest session
+            // (in the group itself, not the pinned section above it).
             self.selected = None;
             self.rebuild();
-            let first = self.rows.iter().find_map(|r| match r {
-                Row::Item(i) if i.cwd == cwd => Some(i.id.clone()),
-                _ => None,
-            });
+            let first = self
+                .rows
+                .iter()
+                .skip_while(|r| !matches!(r, Row::Header { cwd: c, .. } if *c == cwd))
+                .find_map(|r| match r {
+                    Row::Item(i) if i.cwd == cwd => Some(i.id.clone()),
+                    _ => None,
+                });
             self.select(first);
         }
         self.rebuild();
@@ -744,6 +784,7 @@ impl App {
                     KeyCode::Char('o') => self.new_in(self.selected_dir()),
                     KeyCode::Char('k') => self.kill_selected(),
                     KeyCode::Char('F') => self.fork_selected(),
+                    KeyCode::Char('p') => self.toggle_pin(),
                     KeyCode::Char('l') => {
                         self.live_only = !self.live_only;
                         self.rebuild();
@@ -825,6 +866,7 @@ impl App {
                     }
                     KeyCode::Char('d') => self.kill_selected(),
                     KeyCode::Char('F') => self.fork_selected(),
+                    KeyCode::Char('p') => self.toggle_pin(),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
                     KeyCode::Char(' ') => self.mode = Mode::Space,
@@ -986,9 +1028,28 @@ fn fork_args(from: &str, new: &str) -> Vec<String> {
     ["--resume", from, "--fork-session", "--session-id", new].map(String::from).to_vec()
 }
 
-fn keymap_hidden_flag() -> PathBuf {
+fn state_file(name: &str) -> PathBuf {
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| data::home().join(".local/state"));
-    state.join("cdeck/keymap-hidden")
+    state.join("cdeck").join(name)
+}
+
+fn keymap_hidden_flag() -> PathBuf {
+    state_file("keymap-hidden")
+}
+
+/// Session ids kept one per line, so the files stay greppable and hand-editable.
+fn load_ids(name: &str) -> HashSet<String> {
+    std::fs::read_to_string(state_file(name)).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+fn save_ids(name: &str, ids: &HashSet<String>) -> std::io::Result<()> {
+    let path = state_file(name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut v: Vec<&str> = ids.iter().map(String::as_str).collect();
+    v.sort();
+    std::fs::write(path, v.iter().map(|id| format!("{id}\n")).collect::<String>())
 }
 
 impl App {
@@ -1072,7 +1133,7 @@ impl App {
         let id = match &self.rows[i] {
             Row::NewChat => NEW_CHAT.to_string(),
             Row::Item(it) => it.id.clone(),
-            Row::Header { .. } => match self.rows.get(i + 1) {
+            Row::Header { .. } | Row::Pinned => match self.rows.get(i + 1) {
                 Some(Row::Item(it)) => it.id.clone(),
                 _ => return,
             },
