@@ -105,6 +105,8 @@ pub struct App {
     phase: HashMap<String, (Phase, bool)>,
     /// Desktop notifications when a chat finishes or needs you; `:notify` toggles.
     pub notify: bool,
+    /// Mouse capture; off hands the mouse back to the terminal for native selection.
+    pub mouse: bool,
     quit: bool,
 }
 
@@ -145,6 +147,7 @@ impl App {
             confirm_resume: None,
             phase: HashMap::new(),
             notify: !state_file("notify-off").exists(),
+            mouse: !state_file("mouse-off").exists(),
             quit: false,
         };
         app.rebuild();
@@ -560,6 +563,7 @@ impl App {
                 self.rebuild();
             }
             "notify" => self.toggle_notify(),
+            "mouse" => self.toggle_mouse(),
             "h" | "help" => self.help = true,
             _ => self.error(&format!("unknown command: {cmd}")),
         }
@@ -821,6 +825,7 @@ impl App {
                     KeyCode::Char('?') => self.toggle_keymap(),
                     KeyCode::Char('r') => self.refresh(),
                     KeyCode::Char('z') => self.toggle_group(),
+                    KeyCode::Char('M') => self.toggle_mouse(),
                     KeyCode::Tab => self.cycle_live(true),
                     KeyCode::BackTab => self.cycle_live(false),
                     KeyCode::Esc => {
@@ -922,6 +927,19 @@ impl App {
         }
     }
 
+    fn toggle_mouse(&mut self) {
+        self.mouse = !self.mouse;
+        set_flag("mouse-off", !self.mouse);
+        let mut out = std::io::stdout();
+        if self.mouse {
+            let _ = execute!(out, event::EnableMouseCapture);
+            self.info("mouse on · M frees it for native text selection");
+        } else {
+            let _ = execute!(out, event::DisableMouseCapture);
+            self.info("mouse off — select text natively, M turns it back on");
+        }
+    }
+
     fn toggle_notify(&mut self) {
         self.notify = !self.notify;
         set_flag("notify-off", !self.notify);
@@ -956,7 +974,10 @@ fn main() -> std::io::Result<()> {
     if enhanced {
         let _ = execute!(out, PushKeyboardEnhancementFlags(KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES));
     }
-    let _ = execute!(out, event::EnableBracketedPaste, event::EnableMouseCapture);
+    let _ = execute!(out, event::EnableBracketedPaste);
+    if app.mouse {
+        let _ = execute!(out, event::EnableMouseCapture);
+    }
 
     let mut last_gen = u64::MAX;
     let mut last_draw = Instant::now() - Duration::from_secs(1);

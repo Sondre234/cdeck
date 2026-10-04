@@ -906,6 +906,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     if app.live_only {
         right = format!("live-only · {right}");
     }
+    if !app.mouse {
+        right = format!("mouse off · {right}");
+    }
     if !app.notify {
         right = format!("quiet · {right}");
     }
@@ -959,6 +962,7 @@ fn draw_help(f: &mut Frame) {
                 ("O", "new chat, pick the directory first"),
                 ("d", "kill live instance"),
                 ("z", "expand / fold a directory"),
+                ("M", "mouse capture off / on, for native selection"),
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
@@ -982,7 +986,7 @@ fn draw_help(f: &mut Frame) {
                 ("wheel on list", "next / previous chat"),
                 ("click", "select · click again to open"),
                 ("wheel on pane", "scroll the pane"),
-                ("Shift-drag", "select text (terminal's own)"),
+                ("Shift-drag", "select text natively (most terminals)"),
             ],
         ),
         (
@@ -993,6 +997,7 @@ fn draw_help(f: &mut Frame) {
                 (":kill  :live", "kill instance / live-only view"),
                 (":resume!", "resume even if running elsewhere"),
                 (":notify", "desktop notifications on / off"),
+                (":mouse", "mouse capture off / on, like M"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
         ),
@@ -1081,6 +1086,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("Tab", "complete dir"),
                 ("⏎ / Esc", "run / cancel"),
                 ("notify", "notifications on/off"),
+                ("mouse", "mouse capture on/off"),
             ],
         ),
         (Mode::Search, _) => (
@@ -1117,6 +1123,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("n", "new chat"),
                 ("d", "kill"),
                 ("space", "menu…"),
+                ("M", "mouse on/off"),
                 ("?", "hide this map"),
             ],
         ),
@@ -1136,6 +1143,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("/", "search"),
                 ("space", "menu…"),
                 ("g  Ctrl-w", "goto… window…"),
+                ("M", "mouse on/off"),
                 (":", "command…"),
                 (":q", "quit"),
                 ("?", "hide this map"),
