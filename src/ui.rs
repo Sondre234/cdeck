@@ -843,13 +843,20 @@ fn highlight(line: &Line<'static>, needle: &str) -> Line<'static> {
     Line { spans, ..line.clone() }
 }
 
-/// First rendered line showing `needle` (lowercase) in a user or assistant
-/// message. A match split by wrapping falls back to the top of its message.
+/// Rendered lines showing `needle` (lowercase) in a user or assistant message.
+pub fn match_lines(lines: &[Line], owners: &[Option<usize>], needle: &str) -> Vec<usize> {
+    (0..lines.len())
+        .filter(|&i| {
+            owners[i].is_some()
+                && lines[i].spans.iter().map(|s| s.content.as_ref()).collect::<String>().to_lowercase().contains(needle)
+        })
+        .collect()
+}
+
+/// First rendered line showing `needle` (lowercase). A match split by
+/// wrapping falls back to the top of its message.
 fn match_line(entries: &[Entry], lines: &[Line], owners: &[Option<usize>], needle: &str) -> Option<usize> {
-    let hit = |i: usize| {
-        owners[i].is_some() && lines[i].spans.iter().map(|s| s.content.as_ref()).collect::<String>().to_lowercase().contains(needle)
-    };
-    (0..lines.len()).find(|&i| hit(i)).or_else(|| {
+    match_lines(lines, owners, needle).first().copied().or_else(|| {
         let e = entries.iter().position(|e| match e {
             Entry::User(t) | Entry::Assistant(t) => t.to_lowercase().contains(needle),
             Entry::Tool(_) => false,
