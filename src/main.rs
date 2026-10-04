@@ -5,6 +5,7 @@ mod keys;
 mod live;
 mod search;
 mod ui;
+mod window;
 
 use crossterm::event::{
     MouseButton, MouseEvent, MouseEventKind,
@@ -14,7 +15,7 @@ use crossterm::event::{
 use crossterm::{execute, terminal};
 use data::{Entry, Running, Store};
 use live::Live;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime};
@@ -43,6 +44,8 @@ pub const NEW_CHAT: &str = "+new";
 
 pub enum Row {
     NewChat,
+    /// Heads the pinned chats, which sit above the directory groups.
+    Pinned,
     Header { cwd: PathBuf, count: usize, live: usize },
     More { hidden: usize },
     Item(Item),
@@ -102,6 +105,10 @@ pub struct App {
     pub help: bool,
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
     pub keymap: bool,
+    pub pinned: HashSet<String>,
+    /// Hidden from the list; the transcripts themselves are never touched.
+    pub archived: HashSet<String>,
+    pub show_archived: bool,
     pub tick: usize,
     confirm_resume: Option<String>,
     /// Last seen phase of each live chat, and whether Claude's status file said so.
@@ -110,6 +117,7 @@ pub struct App {
     pub notify: bool,
     /// Mouse capture; off hands the mouse back to the terminal for native selection.
     pub mouse: bool,
+    confirm_window: Option<String>,
     quit: bool,
 }
 
@@ -147,11 +155,15 @@ impl App {
             pane: (24, 80),
             help: false,
             keymap: !state_file("keymap-hidden").exists(),
+            pinned: load_ids("pinned"),
+            archived: load_ids("archived"),
+            show_archived: false,
             tick: 0,
             confirm_resume: None,
             phase: HashMap::new(),
             notify: !state_file("notify-off").exists(),
             mouse: !state_file("mouse-off").exists(),
+            confirm_window: None,
             quit: false,
         };
         app.rebuild();
@@ -230,10 +242,16 @@ impl App {
         let f = query.text.to_lowercase();
         let now = SystemTime::now();
         let mut groups: HashMap<PathBuf, Vec<(SystemTime, Item)>> = HashMap::new();
+        // Pinned chats leave their directory group rather than showing twice.
+        let mut pins: Vec<(SystemTime, Item)> = Vec::new();
         let content = (self.search.query == f).then_some(&self.search.hits);
         for mut it in items.into_values() {
             let active = self.live(&it.id).is_some() || self.running.contains_key(&it.id);
             if (self.live_only && !active) || !query.admits(&it.cwd, it.mtime) {
+                continue;
+            }
+            // Running chats stay put until they stop, so nothing live goes missing.
+            if !self.show_archived && !active && self.archived.contains(&it.id) {
                 continue;
             }
             if !f.is_empty()
@@ -246,15 +264,25 @@ impl App {
                 }
             }
             let key = if active { now } else { it.mtime.unwrap_or(SystemTime::UNIX_EPOCH) };
-            groups.entry(it.cwd.clone()).or_default().push((key, it));
+            if self.pinned.contains(&it.id) {
+                pins.push((key, it));
+            } else {
+                groups.entry(it.cwd.clone()).or_default().push((key, it));
+            }
         }
+        let newest_first = |a: &(SystemTime, Item), b: &(SystemTime, Item)| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id));
         let mut groups: Vec<_> = groups.into_iter().collect();
         for (_, v) in &mut groups {
-            v.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.id.cmp(&b.1.id)));
+            v.sort_by(newest_first);
         }
         groups.sort_by(|a, b| b.1[0].0.cmp(&a.1[0].0).then_with(|| a.0.cmp(&b.0)));
+        pins.sort_by(newest_first);
         self.rows.clear();
         self.rows.push(Row::NewChat);
+        if !pins.is_empty() {
+            self.rows.push(Row::Pinned);
+            self.rows.extend(pins.into_iter().map(|(_, i)| Row::Item(i)));
+        }
         for (cwd, v) in groups {
             let live = v.iter().filter(|(_, i)| self.live(&i.id).is_some()).count();
             let count = v.len();
@@ -400,6 +428,7 @@ impl App {
             self.preview_scroll = 0;
             self.jump_to_match = self.selected.clone();
             self.confirm_resume = None;
+            self.confirm_window = None;
             if let Some(cwd) = self.selected_item().map(|i| i.cwd.clone()) {
                 self.last_dir = Some(cwd);
             }
@@ -423,8 +452,13 @@ impl App {
     /// Jump to the first session of the next/previous directory group.
     fn jump_group(&mut self, forward: bool) {
         let Some(cur) = self.selected_row() else { return };
-        let headers: Vec<usize> =
-            self.rows.iter().enumerate().filter(|(_, r)| matches!(r, Row::Header { .. })).map(|(i, _)| i).collect();
+        let headers: Vec<usize> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, Row::Header { .. } | Row::Pinned))
+            .map(|(i, _)| i)
+            .collect();
         let mine = headers.iter().rev().find(|&&h| h < cur).copied().unwrap_or(0);
         let target = if forward {
             headers.iter().find(|&&h| h > cur).copied()
@@ -502,6 +536,96 @@ impl App {
             }
         }
         self.spawn(&item.id, &item.cwd, vec!["--resume".into(), item.id.clone()]);
+    }
+
+    /// Branch the selected chat into a new session. Claude picks the fork's id
+    /// unless told, so we choose it up front to track the new instance.
+    fn fork_selected(&mut self) {
+        let Some(item) = self.selected_item().cloned() else { return self.error("select a chat to fork") };
+        if !self.store.sessions.contains_key(&item.id) {
+            return self.error("nothing to fork yet — the chat has no transcript");
+        }
+        let id = data::new_uuid();
+        self.spawn(&id, &item.cwd, fork_args(&item.id, &id));
+        if self.live(&id).is_some() {
+            self.info(&format!("forked from {}", item.title));
+        }
+    }
+
+    /// The selected chat (or a fresh one in its directory) in a terminal window
+    /// of its own, for when you want it next to cdeck rather than inside it.
+    fn open_window(&mut self, force: bool) {
+        let prog = std::env::var("CDECK_CLAUDE").unwrap_or_else(|_| "claude".into());
+        let item = self.selected_item().cloned();
+        let (dir, cmd) = match &item {
+            Some(it) => (it.cwd.clone(), vec![prog, "--resume".into(), it.id.clone()]),
+            None => (self.selected_dir(), vec![prog]),
+        };
+        if let Some(it) = &item {
+            // Two copies of one session would both write to the same transcript.
+            let here = self.live(&it.id).is_some();
+            if (here || self.running.contains_key(&it.id)) && !force && self.confirm_window.as_deref() != Some(it.id.as_str()) {
+                self.confirm_window = Some(it.id.clone());
+                let place = if here { "in cdeck" } else { "elsewhere" };
+                return self.error(&format!("already running {place} — E again opens a second copy"));
+            }
+        }
+        if !dir.is_dir() {
+            return self.error(&format!("{} does not exist", data::tilde(&dir)));
+        }
+        let Some(term) = window::terminal() else { return self.error("no terminal found — set $TERMINAL") };
+        let name = Path::new(&term[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        match window::launch(&window::command(&term, &dir, &cmd), &dir) {
+            Ok(()) => self.info(&format!("opened in a new {name} window")),
+            Err(e) => self.error(&format!("couldn't start {}: {e}", term[0])),
+        }
+    }
+
+    fn toggle_pin(&mut self) {
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to pin") };
+        let pinned = !self.pinned.remove(&id);
+        if pinned {
+            self.pinned.insert(id);
+        }
+        self.rebuild();
+        match save_ids("pinned", &self.pinned) {
+            Err(e) => self.error(&format!("couldn't save pins: {e}")),
+            Ok(()) => self.info(if pinned { "pinned · p again unpins" } else { "unpinned" }),
+        }
+    }
+
+    fn toggle_archive(&mut self) {
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to archive") };
+        let archived = !self.archived.remove(&id);
+        let active = self.live(&id).is_some() || self.running.contains_key(&id);
+        let hides = archived && !active && !self.show_archived;
+        if archived {
+            self.archived.insert(id.clone());
+        }
+        // Step to a neighbour before it vanishes, rather than jumping to the top.
+        if hides {
+            let ids: Vec<&str> = self.item_ids().collect();
+            let pos = ids.iter().position(|&i| i == id).unwrap_or(0);
+            let next = ids.get(pos + 1).or_else(|| ids.get(pos.checked_sub(1)?)).map(|s| s.to_string());
+            self.select(next);
+        }
+        self.rebuild();
+        let msg = match (archived, hides, active) {
+            (false, ..) => "unarchived",
+            (true, true, _) => "archived · undo: :archived shows archived chats, then x on it",
+            (true, false, true) => "archived · hidden once it stops running · x again undoes",
+            (true, false, false) => "archived · x again undoes",
+        };
+        match save_ids("archived", &self.archived) {
+            Err(e) => self.error(&format!("couldn't save archive: {e}")),
+            Ok(()) => self.info(msg),
+        }
+    }
+
+    fn toggle_show_archived(&mut self) {
+        self.show_archived = !self.show_archived;
+        self.rebuild();
+        self.info(if self.show_archived { "showing archived chats · x unarchives" } else { "archived chats hidden" });
     }
 
     fn kill_selected(&mut self) {
@@ -597,6 +721,11 @@ impl App {
                 }
             }
             "k" | "kill" => self.kill_selected(),
+            "fork" => self.fork_selected(),
+            "pin" => self.toggle_pin(),
+            "win" | "win!" => self.open_window(cmd.ends_with('!')),
+            "archive" => self.toggle_archive(),
+            "archived" => self.toggle_show_archived(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
             "r" | "refresh" => self.refresh(),
             "live" => {
@@ -616,13 +745,18 @@ impl App {
         if !self.expanded.remove(&cwd) {
             self.expanded.insert(cwd.clone());
         } else {
-            // Folding may hide the selection; land on the group's newest session.
+            // Folding may hide the selection; land on the group's newest session
+            // (in the group itself, not the pinned section above it).
             self.selected = None;
             self.rebuild();
-            let first = self.rows.iter().find_map(|r| match r {
-                Row::Item(i) if i.cwd == cwd => Some(i.id.clone()),
-                _ => None,
-            });
+            let first = self
+                .rows
+                .iter()
+                .skip_while(|r| !matches!(r, Row::Header { cwd: c, .. } if *c == cwd))
+                .find_map(|r| match r {
+                    Row::Item(i) if i.cwd == cwd => Some(i.id.clone()),
+                    _ => None,
+                });
             self.select(first);
         }
         self.rebuild();
@@ -786,6 +920,11 @@ impl App {
                     KeyCode::Char('n') => self.start_compose(self.selected_dir()),
                     KeyCode::Char('o') => self.new_in(self.selected_dir()),
                     KeyCode::Char('k') => self.kill_selected(),
+                    KeyCode::Char('F') => self.fork_selected(),
+                    KeyCode::Char('p') => self.toggle_pin(),
+                    KeyCode::Char('x') => self.toggle_archive(),
+                    KeyCode::Char('a') => self.toggle_show_archived(),
+                    KeyCode::Char('E') => self.open_window(false),
                     KeyCode::Char('l') => {
                         self.live_only = !self.live_only;
                         self.rebuild();
@@ -868,6 +1007,10 @@ impl App {
                         self.open_picker("");
                     }
                     KeyCode::Char('d') => self.kill_selected(),
+                    KeyCode::Char('F') => self.fork_selected(),
+                    KeyCode::Char('p') => self.toggle_pin(),
+                    KeyCode::Char('x') => self.toggle_archive(),
+                    KeyCode::Char('E') => self.open_window(false),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
                     KeyCode::Char(' ') => self.mode = Mode::Space,
@@ -1112,6 +1255,11 @@ fn is_leave(k: &KeyEvent) -> bool {
     k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
+/// `--session-id` is only accepted alongside `--resume` when forking.
+fn fork_args(from: &str, new: &str) -> Vec<String> {
+    ["--resume", from, "--fork-session", "--session-id", new].map(String::from).to_vec()
+}
+
 /// Remembered choices live as empty flag files under $XDG_STATE_HOME/cdeck.
 fn state_file(name: &str) -> PathBuf {
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| data::home().join(".local/state"));
@@ -1126,6 +1274,21 @@ fn set_flag(name: &str, on: bool) {
     } else {
         let _ = std::fs::remove_file(&flag);
     }
+}
+
+/// Session ids kept one per line, so the files stay greppable and hand-editable.
+fn load_ids(name: &str) -> HashSet<String> {
+    std::fs::read_to_string(state_file(name)).unwrap_or_default().lines().map(str::trim).filter(|l| !l.is_empty()).map(String::from).collect()
+}
+
+fn save_ids(name: &str, ids: &HashSet<String>) -> std::io::Result<()> {
+    let path = state_file(name);
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let mut v: Vec<&str> = ids.iter().map(String::as_str).collect();
+    v.sort();
+    std::fs::write(path, v.iter().map(|id| format!("{id}\n")).collect::<String>())
 }
 
 impl App {
@@ -1206,7 +1369,7 @@ impl App {
         let id = match &self.rows[i] {
             Row::NewChat => NEW_CHAT.to_string(),
             Row::Item(it) => it.id.clone(),
-            Row::Header { .. } => match self.rows.get(i + 1) {
+            Row::Header { .. } | Row::Pinned => match self.rows.get(i + 1) {
                 Some(Row::Item(it)) => it.id.clone(),
                 _ => return,
             },
@@ -1243,5 +1406,10 @@ mod tests {
         assert_eq!(noteworthy(Some(Waiting), Busy), None);
         assert_eq!(noteworthy(Some(Waiting), Idle), None);
         assert_eq!(noteworthy(Some(Idle), Busy), None);
+    }
+
+    #[test]
+    fn fork_names_the_new_session() {
+        assert_eq!(fork_args("old", "new"), ["--resume", "old", "--fork-session", "--session-id", "new"]);
     }
 }

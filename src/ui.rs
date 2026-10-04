@@ -140,6 +140,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ("o", "new chat here, no prompt"),
                 ("f", "search chats"),
                 ("k", "kill instance"),
+                ("F", "fork chat"),
+                ("p", "pin / unpin chat"),
+                ("x", "archive / unarchive"),
+                ("a", "show archived"),
+                ("E", "open in a new terminal window"),
                 ("l", "toggle live-only"),
                 ("r", "rescan"),
                 ("?", "help"),
@@ -223,6 +228,7 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     let mut lines: Vec<Line<'static>> = Vec::new();
     let mut sel_line = 0;
     let mut group_color = th().faint;
+    let mut in_pins = false;
     let mut line_rows: Vec<Option<usize>> = Vec::new();
     for (i, row) in app.rows.iter().enumerate() {
         let before = lines.len();
@@ -252,7 +258,16 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     lines.push(Line::from(Span::styled(msg, Style::new().fg(th().faint))));
                 }
             }
+            Row::Pinned => {
+                in_pins = true;
+                lines.push(Line::from(""));
+                lines.push(Line::from(vec![
+                    Span::styled("  ★ ", Style::new().fg(th().accent)),
+                    Span::styled("Pinned", Style::new().fg(th().accent).bold()),
+                ]));
+            }
             Row::Header { cwd, count, live } => {
+                in_pins = false;
                 let c = dir_color(cwd);
                 group_color = c;
                 lines.push(Line::from(""));
@@ -285,18 +300,33 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 let live = app.live(&it.id).is_some();
                 let unseen = matches!(app.status(&it.id), Status::Idle { unseen: true });
                 let age = data::age(it.mtime);
-                let title = trunc(&it.title, w.saturating_sub(8 + age.width()));
+                // Out of its group, a pinned chat names its directory instead.
+                let dir = if in_pins { trunc(&basename(&it.cwd), w / 3) } else { String::new() };
+                let title = trunc(&it.title, w.saturating_sub(8 + age.width() + if in_pins { dir.width() + 1 } else { 0 }));
+                let archived = app.archived.contains(&it.id);
                 let mut title_style = Style::new().fg(if live || selected { Color::Reset } else { th().muted });
                 if unseen || selected {
                     title_style = title_style.bold();
                 }
+                // Only visible under :archived (or while still running).
+                let glyph = match app.status(&it.id) {
+                    Status::Dormant if archived => Span::styled("×", Style::new().fg(th().faint)),
+                    _ => status_glyph(app, &it.id),
+                };
+                if archived {
+                    title_style = title_style.fg(th().faint).italic();
+                }
                 let mut spans = vec![
                     Span::styled("  │ ", Style::new().fg(c)),
-                    status_glyph(app, &it.id),
+                    glyph,
                     Span::raw(" "),
                     Span::styled(title, title_style),
                 ];
-                pad_to(&mut spans, w, vec![Span::styled(format!("{age} "), Style::new().fg(th().faint))]);
+                let mut right = vec![Span::styled(format!("{age} "), Style::new().fg(th().faint))];
+                if in_pins {
+                    right.insert(0, Span::styled(format!("{dir} "), Style::new().fg(c)));
+                }
+                pad_to(&mut spans, w, right);
                 let mut line = Line::from(spans);
                 if selected {
                     sel_line = lines.len();
@@ -926,7 +956,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             )),
         },
     }
-    let mut right = format!("{} live · {} chats ", app.lives.len(), app.store.visible().count());
+    let archived = app.store.visible().filter(|s| app.archived.contains(&s.id)).count();
+    let chats = app.store.visible().count() - if app.show_archived { 0 } else { archived };
+    let mut right = format!("{} live · {chats} chats ", app.lives.len());
+    if app.show_archived {
+        right = format!("{archived} archived · {right}");
+    }
     if !app.filter.is_empty() && app.mode != Mode::Search {
         right = format!("/{} · {right}", app.filter);
     }
@@ -988,6 +1023,10 @@ fn draw_help(f: &mut Frame) {
                 ("o", "new chat in this dir, no prompt"),
                 ("O", "new chat, pick the directory first"),
                 ("d", "kill live instance"),
+                ("F", "fork: continue a copy as a new chat"),
+                ("p", "pin / unpin: keep it at the top"),
+                ("x", "archive: hide it (transcript kept)"),
+                ("E", "open in its own terminal window"),
                 ("z", "expand / fold a directory"),
                 ("M", "mouse capture off / on, for native selection"),
                 ("Tab S-Tab", "cycle live chats"),
@@ -1024,6 +1063,10 @@ fn draw_help(f: &mut Frame) {
                 (":new [dir]", "new chat; dir can be fuzzy (:new cdeck)"),
                 (":open [dir]", "start claude there, no prompt (fuzzy too)"),
                 (":kill  :live", "kill instance / live-only view"),
+                (":fork  :pin", "fork / pin the selected chat"),
+                (":archive", "archive / unarchive the selected chat"),
+                (":archived", "show / hide archived chats"),
+                (":win  :win!", "own terminal window (! even if running)"),
                 (":resume!", "resume even if running elsewhere"),
                 (":notify", "desktop notifications on / off"),
                 (":mouse", "mouse capture off / on, like M"),
@@ -1037,26 +1080,47 @@ fn draw_help(f: &mut Frame) {
                 ("◐", "waiting on you (permission/input)"),
                 ("●", "idle (bold title: finished while away)"),
                 ("◆", "running in another terminal"),
+                ("×", "archived (listed only under :archived)"),
             ],
         ),
     ];
-    let mut lines = Vec::new();
-    for (name, items) in sections {
-        lines.push(Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().muted).bold())));
-        for (k, d) in *items {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<15}"), Style::new().fg(th().accent)),
-                Span::styled(*d, Style::new().fg(Color::Reset)),
-            ]));
-        }
-        lines.push(Line::from(""));
-    }
+    let blocks: Vec<Vec<Line>> = sections
+        .iter()
+        .map(|(name, items)| {
+            let mut lines = vec![Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().muted).bold()))];
+            for (k, d) in *items {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {k:<15}"), Style::new().fg(th().accent)),
+                    Span::styled(*d, Style::new().fg(Color::Reset)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines
+        })
+        .collect();
     let a = f.area();
-    let w = 66.min(a.width);
-    let h = (lines.len() as u16 + 2).min(a.height);
+    let col_w: u16 = 64;
+    let total: usize = blocks.iter().map(Vec::len).sum();
+    // Too tall for the screen: flow the sections into two balanced columns.
+    let split = if total + 2 > a.height as usize && a.width >= col_w * 2 + 2 {
+        let len = |k: usize| blocks[..k].iter().map(Vec::len).sum::<usize>();
+        (0..=blocks.len()).min_by_key(|&k| len(k).max(total - len(k))).unwrap_or(blocks.len())
+    } else {
+        blocks.len()
+    };
+    let cols: Vec<Vec<Line>> =
+        [&blocks[..split], &blocks[split..]].into_iter().filter(|c| !c.is_empty()).map(|c| c.concat()).collect();
+    let w = (col_w * cols.len() as u16 + 2).min(a.width);
+    let h = (cols.iter().map(Vec::len).max().unwrap_or(0) as u16 + 2).min(a.height);
     let r = Rect::new((a.width - w) / 2, (a.height - h) / 2, w, h);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(lines).block(panel("cdeck — any key closes")), r);
+    let block = panel("cdeck — any key closes");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    for (i, lines) in cols.into_iter().enumerate() {
+        let x = col_w * i as u16;
+        f.render_widget(Paragraph::new(lines), Rect::new(inner.x + x, inner.y, col_w.min(inner.width.saturating_sub(x)), inner.height));
+    }
 }
 
 /// The full path shown after a directory chip, unless the chip already says it all (`~`).
@@ -1109,6 +1173,11 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("new [dir]", "new chat"),
                 ("open [dir]", "start, no prompt"),
                 ("kill", "kill instance"),
+                ("fork", "fork chat"),
+                ("pin", "pin / unpin"),
+                ("archive", "toggle archived"),
+                ("archived", "show archived"),
+                ("win", "own window"),
                 ("live", "live-only view"),
                 ("resume!", "resume anyway"),
                 ("q / q!", "quit / force"),
@@ -1136,6 +1205,11 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("o", "new here, no prompt"),
                 ("f", "search"),
                 ("k", "kill instance"),
+                ("F", "fork chat"),
+                ("p", "pin / unpin"),
+                ("x", "archive"),
+                ("a", "show archived"),
+                ("E", "own window"),
                 ("l", "live-only"),
                 ("r", "rescan"),
                 ("?", "full help"),
@@ -1181,22 +1255,21 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
         (Mode::Normal, Focus::Sidebar) => (
             "chats",
             &[
-                ("↑ ↓", "chat"),
-                ("← →", "directory"),
+                // Five columns fit a typical terminal; the rest are in help.
+                ("↑↓ ←→", "chat / dir"),
                 ("⏎", "open / resume"),
                 ("n", "new chat"),
-                ("o", "new, no prompt"),
-                ("O", "new, pick dir"),
                 ("d", "kill"),
+                ("F", "fork chat"),
+                ("p", "pin / unpin"),
+                ("x", "archive"),
+                ("E", "own window"),
                 ("z", "expand dir"),
                 ("Tab", "next live chat"),
-                ("Ctrl-→", "focus pane"),
                 ("/", "search"),
                 ("space", "menu…"),
                 ("g  Ctrl-w", "goto… window…"),
-                ("M", "mouse on/off"),
-                (":", "command…"),
-                (":q", "quit"),
+                (":  :q", "command… quit"),
                 ("?", "hide this map"),
             ],
         ),
