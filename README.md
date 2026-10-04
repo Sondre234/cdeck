@@ -5,7 +5,7 @@ you've had, grouped by directory, with live Claude sessions running in a pane
 next to the list. Helix-style keys, claude.ai-style new-chat screen.
 
 - Browse and full-text search all past chats from `~/.claude/projects`
-- Resume, fork, pin and archive chats; run several live sessions side by side
+- Resume, fork, rename, pin and archive chats; run several live sessions side by side
 - See at a glance which sessions are working, waiting on you, or done
 - Desktop notifications when a background chat finishes or needs you
 - Adapts to narrow (tiled) windows by showing either the list or the chat
@@ -62,6 +62,7 @@ The footer badge shows the current mode.
 | `F` | fork: continue a copy of this chat as a new session |
 | `p` | pin / unpin (pinned chats sit at the top) |
 | `x` | archive / unarchive (hides it; transcript untouched) |
+| `R` | rename: give the chat a name of your own (only cdeck sees it) |
 | `E` | open in its own terminal window |
 | `z` | expand / fold a directory |
 | `Tab` `Shift-Tab` | cycle through live chats |
@@ -73,6 +74,10 @@ The footer badge shows the current mode.
 | `:` | command line |
 | `space` | menu |
 | `?` | show / hide the key map strip (`space ?` for full help) |
+
+`R` opens the command line prefilled with `rename <current title>` to edit.
+A local name replaces the title everywhere in cdeck (list, pane, notifications,
+search) and is stored in cdeck's own state; `~/.claude` is never written.
 
 ### Focus
 
@@ -174,6 +179,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:pin` | pin / unpin the selected chat |
 | `:archive` | archive / unarchive the selected chat |
 | `:archived` | show / hide archived chats |
+| `:rename [name]` | name the selected chat locally; no name goes back to Claude's title |
 | `:win` / `:win!` | open in its own terminal window (`!`: even if it's running) |
 | `:live` | toggle live-only view |
 | `:notify` | desktop notifications on / off |
@@ -235,7 +241,7 @@ sidebar_width = 40
 |-----------------|---------|
 | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | where transcripts and session status are read from — never written |
 | `$XDG_CONFIG_HOME/cdeck/config.toml` (default `~/.config/cdeck/`) | settings, see [Config](#config) |
-| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
+| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), `names` (`id<TAB>name` per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
 | `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed-title cache so startup doesn't reread every transcript; safe to delete |
 | `$TERMINAL` | terminal used by `E` / `:win`, unless the config sets `terminal` |
 | `$CDECK_CLAUDE` | program to run instead of `claude` (testing) |

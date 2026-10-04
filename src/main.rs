@@ -108,6 +108,8 @@ pub struct App {
     pub pinned: HashSet<String>,
     /// Hidden from the list; the transcripts themselves are never touched.
     pub archived: HashSet<String>,
+    /// Local display names (`R`), shown instead of Claude's titles.
+    pub names: HashMap<String, String>,
     pub show_archived: bool,
     pub tick: usize,
     /// Ctrl-L: throw away what's on screen and draw everything again.
@@ -159,6 +161,7 @@ impl App {
             keymap: !state_file("keymap-hidden").exists(),
             pinned: load_ids("pinned"),
             archived: load_ids("archived"),
+            names: parse_names(&std::fs::read_to_string(state_file("names")).unwrap_or_default()),
             show_archived: false,
             tick: 0,
             repaint: false,
@@ -199,6 +202,11 @@ impl App {
         }
     }
 
+    /// A local name wins over whatever Claude called the chat.
+    fn title_of(&self, s: &data::Session) -> String {
+        self.names.get(&s.id).cloned().unwrap_or_else(|| s.title().into())
+    }
+
     pub fn selected_item(&self) -> Option<&Item> {
         let id = self.selected.as_deref()?;
         self.rows.iter().find_map(|r| match r {
@@ -226,7 +234,7 @@ impl App {
                     Item {
                         id: s.id.clone(),
                         cwd: s.cwd.clone(),
-                        title: s.title().into(),
+                        title: self.title_of(s),
                         branch: s.branch.clone(),
                         mtime: s.mtime,
                         snippet: None,
@@ -238,7 +246,7 @@ impl App {
         for l in &self.lives {
             items.entry(l.id.clone()).or_insert_with(|| {
                 let s = data::Session::new_placeholder(&l.id, &l.cwd);
-                Item { id: l.id.clone(), cwd: l.cwd.clone(), title: s.title().into(), branch: None, mtime: s.mtime, snippet: None }
+                Item { id: l.id.clone(), cwd: l.cwd.clone(), title: self.title_of(&s), branch: None, mtime: s.mtime, snippet: None }
             });
         }
         let query = search::Query::parse(&self.filter);
@@ -625,6 +633,33 @@ impl App {
         }
     }
 
+    /// Name the selected chat locally; an empty name goes back to Claude's title.
+    fn rename_selected(&mut self, name: &str) {
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to rename") };
+        let name: String = name.chars().map(|c| if c.is_control() { ' ' } else { c }).collect();
+        let name = name.trim();
+        let cleared = name.is_empty();
+        if cleared {
+            self.names.remove(&id);
+        } else {
+            self.names.insert(id, name.into());
+        }
+        self.rebuild();
+        let path = state_file("names");
+        let saved = path.parent().map_or(Ok(()), std::fs::create_dir_all).and_then(|()| std::fs::write(&path, format_names(&self.names)));
+        match saved {
+            Err(e) => self.error(&format!("couldn't save names: {e}")),
+            Ok(()) => self.info(if cleared { "name cleared · back to Claude's title" } else { "renamed (only in cdeck) · :rename with no name undoes" }),
+        }
+    }
+
+    /// R: the command line, prefilled with the current title to edit.
+    fn start_rename(&mut self) {
+        let Some(title) = self.selected_item().map(|i| i.title.clone()) else { return self.error("select a chat to rename") };
+        self.cmdline = format!("rename {title}");
+        self.mode = Mode::Command;
+    }
+
     fn toggle_show_archived(&mut self) {
         self.show_archived = !self.show_archived;
         self.rebuild();
@@ -728,6 +763,7 @@ impl App {
             "pin" => self.toggle_pin(),
             "win" | "win!" => self.open_window(cmd.ends_with('!')),
             "archive" => self.toggle_archive(),
+            "rename" => self.rename_selected(arg),
             "archived" => self.toggle_show_archived(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
             "r" | "refresh" => self.refresh(),
@@ -1019,6 +1055,7 @@ impl App {
                     KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('p') => self.toggle_pin(),
                     KeyCode::Char('x') => self.toggle_archive(),
+                    KeyCode::Char('R') => self.start_rename(),
                     KeyCode::Char('E') => self.open_window(false),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
@@ -1112,8 +1149,8 @@ impl App {
 
     fn notify_send(&self, id: &str, what: &str) {
         let (title, cwd) = match self.store.sessions.get(id) {
-            Some(s) => (s.title().to_string(), s.cwd.clone()),
-            None => ("(new session)".into(), self.live(id).map(|l| l.cwd.clone()).unwrap_or_default()),
+            Some(s) => (self.title_of(s), s.cwd.clone()),
+            None => (self.names.get(id).cloned().unwrap_or_else(|| "(new session)".into()), self.live(id).map(|l| l.cwd.clone()).unwrap_or_default()),
         };
         let body = format!("{} · {what}", data::tilde(&cwd));
         // Detached and best-effort: no notify-send, no notification.
@@ -1316,6 +1353,22 @@ fn save_ids(name: &str, ids: &HashSet<String>) -> std::io::Result<()> {
     std::fs::write(path, v.iter().map(|id| format!("{id}\n")).collect::<String>())
 }
 
+/// Local names, one `id<TAB>name` per line: greppable and hand-editable like
+/// the id lists. Lines without a tab or with an empty name are skipped.
+fn parse_names(text: &str) -> HashMap<String, String> {
+    text.lines()
+        .filter_map(|l| l.split_once('\t'))
+        .map(|(id, name)| (id.trim().to_string(), name.trim().to_string()))
+        .filter(|(id, name)| !id.is_empty() && !name.is_empty())
+        .collect()
+}
+
+fn format_names(names: &HashMap<String, String>) -> String {
+    let mut v: Vec<_> = names.iter().collect();
+    v.sort();
+    v.iter().map(|(id, name)| format!("{id}\t{name}\n")).collect()
+}
+
 impl App {
     fn toggle_keymap(&mut self) {
         self.keymap = !self.keymap;
@@ -1431,6 +1484,15 @@ mod tests {
         assert_eq!(noteworthy(Some(Waiting), Busy), None);
         assert_eq!(noteworthy(Some(Waiting), Idle), None);
         assert_eq!(noteworthy(Some(Idle), Busy), None);
+    }
+
+    #[test]
+    fn names_round_trip_and_skip_junk() {
+        let names = parse_names("b\tSecond one\na\t  First \nno tab here\nc\t\n\n");
+        assert_eq!(names.len(), 2);
+        assert_eq!(names["a"], "First");
+        assert_eq!(format_names(&names), "a\tFirst\nb\tSecond one\n");
+        assert_eq!(parse_names(&format_names(&names)), names);
     }
 
     #[test]
