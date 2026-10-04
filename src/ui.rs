@@ -1029,6 +1029,7 @@ fn draw_help(f: &mut Frame) {
                 ("E", "open in its own terminal window"),
                 ("z", "expand / fold a directory"),
                 ("M", "mouse capture off / on, for native selection"),
+                ("Ctrl-l", "redraw the screen if it looks broken"),
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),

@@ -110,6 +110,8 @@ pub struct App {
     pub archived: HashSet<String>,
     pub show_archived: bool,
     pub tick: usize,
+    /// Ctrl-L: throw away what's on screen and draw everything again.
+    pub repaint: bool,
     confirm_resume: Option<String>,
     /// Last seen phase of each live chat, and whether Claude's status file said so.
     phase: HashMap<String, (Phase, bool)>,
@@ -159,6 +161,7 @@ impl App {
             archived: load_ids("archived"),
             show_archived: false,
             tick: 0,
+            repaint: false,
             confirm_resume: None,
             phase: HashMap::new(),
             notify: !state_file("notify-off").exists(),
@@ -969,6 +972,7 @@ impl App {
                     KeyCode::Right if ctrl => return self.focus = Focus::Pane,
                     KeyCode::Char('w') if ctrl => return self.mode = Mode::Window,
                     KeyCode::Char('n') if ctrl => return self.start_compose(self.selected_dir()),
+                    KeyCode::Char('l') if ctrl => return self.repaint = true,
                     _ => {}
                 }
                 if self.focus == Focus::Pane {
@@ -1177,6 +1181,8 @@ fn main() -> std::io::Result<()> {
     let mut last_scan = Instant::now();
     let mut last_save = Instant::now();
     let mut dirty = true;
+    let mut last_size = term.size()?;
+    let mut resized_at: Option<Instant> = None;
     while !app.quit {
         if last_poll.elapsed() >= Duration::from_millis(500) {
             last_poll = Instant::now();
@@ -1206,6 +1212,20 @@ fn main() -> std::io::Result<()> {
             dirty = true;
         }
         let size = term.size()?;
+        if size != last_size {
+            last_size = size;
+            resized_at = Some(Instant::now());
+        }
+        // A compositor animating the window (Hyprland) resizes the terminal in
+        // bursts, and a frame drawn mid-burst can be partly dropped while
+        // ratatui believes it's on screen. Once the size settles, repaint
+        // everything rather than trusting the diff.
+        if app.repaint || resized_at.is_some_and(|t| t.elapsed() >= Duration::from_millis(200)) {
+            term.clear()?;
+            app.repaint = false;
+            resized_at = None;
+            dirty = true;
+        }
         let pane = ui::pane_size(size.into(), app.keymap);
         app.pane = pane;
         for l in &mut app.lives {

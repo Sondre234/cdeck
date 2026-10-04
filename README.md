@@ -69,6 +69,7 @@ The footer badge shows the current mode.
 | `Esc` | clear the search filter |
 | `r` | rescan transcripts |
 | `M` | mouse capture off / on |
+| `Ctrl-l` | redraw the whole screen (if it ever looks garbled) |
 | `:` | command line |
 | `space` | menu |
 | `?` | show / hide the key map strip (`space ?` for full help) |
