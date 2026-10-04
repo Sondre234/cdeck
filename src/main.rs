@@ -86,7 +86,11 @@ pub struct App {
     pub live_only: bool,
     pub msg: Option<(String, bool)>,
     pub preview: Option<(String, u64, Vec<Entry>)>,
-    pub wrapped: Option<(String, u64, u16, Vec<ratatui::text::Line<'static>>)>,
+    /// Rendered preview, plus which transcript entry each line came from
+    /// (None for tool calls, which search skips).
+    pub wrapped: Option<(String, u64, u16, Vec<ratatui::text::Line<'static>>, Vec<Option<usize>>)>,
+    /// Chat whose preview should scroll to the search match once it's known.
+    pub jump_to_match: Option<String>,
     pub side_offset: usize,
     pub hits: Hits,
     expanded: std::collections::HashSet<PathBuf>,
@@ -124,6 +128,7 @@ impl App {
             msg: None,
             preview: None,
             wrapped: None,
+            jump_to_match: None,
             side_offset: 0,
             hits: Hits::default(),
             expanded: Default::default(),
@@ -379,6 +384,7 @@ impl App {
         if id.is_some() && id != self.selected {
             self.selected = id;
             self.preview_scroll = 0;
+            self.jump_to_match = self.selected.clone();
             self.confirm_resume = None;
             if let Some(cwd) = self.selected_item().map(|i| i.cwd.clone()) {
                 self.last_dir = Some(cwd);
@@ -496,6 +502,7 @@ impl App {
     }
 
     fn scroll(&mut self, up: bool, amount: usize) {
+        self.jump_to_match = None;
         let id = self.selected.clone().unwrap_or_default();
         if let Some(l) = self.live(&id) {
             l.scroll(if up { amount as isize } else { -(amount as isize) });
@@ -587,6 +594,7 @@ impl App {
         let mut files: Vec<_> = self.store.visible().map(|s| (s.mtime, s.id.clone(), s.file.clone())).collect();
         files.sort_by(|a, b| b.0.cmp(&a.0));
         self.search.start(&self.filter, files.into_iter().map(|(_, id, f)| (id, f)).collect());
+        self.jump_to_match = self.selected.clone();
     }
 
     fn complete_path(&mut self) {

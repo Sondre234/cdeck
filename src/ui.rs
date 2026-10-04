@@ -683,12 +683,13 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
     let col_w = area.width.saturating_sub(4).min(96);
     let margin = " ".repeat(((area.width - col_w) / 2) as usize);
     let cw = col_w as usize;
-    if !matches!(&app.wrapped, Some((wid, wlen, ww, _)) if wid == id && *wlen == len && *ww == area.width) {
+    if !matches!(&app.wrapped, Some((wid, wlen, ww, _, _)) if wid == id && *wlen == len && *ww == area.width) {
         let entries = &app.preview.as_ref().unwrap().2;
         let initial = std::env::var("USER").ok().and_then(|u| u.chars().next()).unwrap_or('U').to_ascii_uppercase();
         let mut lines: Vec<Line<'static>> = Vec::new();
+        let mut owners: Vec<Option<usize>> = Vec::new();
         let mut after_user = true;
-        for e in entries {
+        for (ei, e) in entries.iter().enumerate() {
             match e {
                 Entry::User(t) => {
                     lines.push(Line::from(""));
@@ -737,16 +738,45 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
                     after_user = false;
                 }
             }
+            let owner = (!matches!(e, Entry::Tool(_))).then_some(ei);
+            owners.resize(lines.len(), owner);
         }
-        app.wrapped = Some((id.into(), len, area.width, lines));
+        app.wrapped = Some((id.into(), len, area.width, lines, owners));
     }
-    let lines = &app.wrapped.as_ref().unwrap().3;
+    let (_, _, _, lines, owners) = app.wrapped.as_ref().unwrap();
     let h = area.height as usize;
     let max_scroll = lines.len().saturating_sub(h);
+    if app.jump_to_match.as_deref() == Some(id) {
+        let q = &app.search.query;
+        if app.search.hits.contains_key(id) {
+            // Put the match near the top, with a little context above it.
+            if let Some(m) = match_line(app.preview.as_ref().unwrap().2.as_slice(), lines, owners, q) {
+                app.preview_scroll = lines.len().saturating_sub(m.saturating_sub(2) + h);
+            }
+            app.jump_to_match = None;
+        } else if !app.search.running || q.chars().count() < crate::search::MIN_QUERY {
+            app.jump_to_match = None;
+        }
+    }
     app.preview_scroll = app.preview_scroll.min(max_scroll);
     let end = lines.len() - app.preview_scroll;
     let start = end.saturating_sub(h);
     f.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
+}
+
+/// First rendered line showing `needle` (lowercase) in a user or assistant
+/// message. A match split by wrapping falls back to the top of its message.
+fn match_line(entries: &[Entry], lines: &[Line], owners: &[Option<usize>], needle: &str) -> Option<usize> {
+    let hit = |i: usize| {
+        owners[i].is_some() && lines[i].spans.iter().map(|s| s.content.as_ref()).collect::<String>().to_lowercase().contains(needle)
+    };
+    (0..lines.len()).find(|&i| hit(i)).or_else(|| {
+        let e = entries.iter().position(|e| match e {
+            Entry::User(t) | Entry::Assistant(t) => t.to_lowercase().contains(needle),
+            Entry::Tool(_) => false,
+        })?;
+        owners.iter().position(|&o| o == Some(e))
+    })
 }
 
 fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
