@@ -560,8 +560,9 @@ impl App {
             return self.error(&format!("{} does not exist", data::tilde(&dir)));
         }
         let Some(term) = window::terminal() else { return self.error("no terminal found — set $TERMINAL") };
+        let name = Path::new(&term[0]).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
         match window::launch(&window::command(&term, &dir, &cmd), &dir) {
-            Ok(()) => self.info(&format!("opened in a new {} window", term[0])),
+            Ok(()) => self.info(&format!("opened in a new {name} window")),
             Err(e) => self.error(&format!("couldn't start {}: {e}", term[0])),
         }
     }
