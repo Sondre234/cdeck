@@ -113,7 +113,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
             &[
                 ("n", "new chat…"),
                 ("o", "new chat here, no prompt"),
-                ("f", "filter chats"),
+                ("f", "search chats"),
                 ("k", "kill instance"),
                 ("l", "toggle live-only"),
                 ("r", "rescan"),
@@ -217,7 +217,11 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(line);
                 if app.rows.len() == 1 {
                     lines.push(Line::from(""));
-                    let msg = if app.filter.is_empty() { "  no chats yet" } else { "  no matches" };
+                    let msg = match (app.filter.is_empty(), app.search.running) {
+                        (true, _) => "  no chats yet",
+                        (false, true) => "  searching transcripts…",
+                        (false, false) => "  no matches",
+                    };
                     lines.push(Line::from(Span::styled(msg, Style::new().fg(th().faint))));
                 }
             }
@@ -272,6 +276,17 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                     line = line.style(Style::new().bg(sel_bg));
                 }
                 lines.push(line);
+                // Matched inside the transcript: show where.
+                if let Some(snip) = &it.snippet {
+                    let mut line = Line::from(vec![
+                        Span::styled("  │   ", Style::new().fg(c)),
+                        Span::styled(trunc(snip, w.saturating_sub(7)), Style::new().fg(th().faint).italic()),
+                    ]);
+                    if selected {
+                        line = line.style(Style::new().bg(sel_bg));
+                    }
+                    lines.push(line);
+                }
             }
         }
         // Remember which row each visual line belongs to, for mouse hits.
@@ -756,6 +771,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         Mode::Search => {
             spans.push(Span::styled(format!("/{}", app.filter), Style::new().fg(Color::Reset)));
             cursor = Some(app.filter.width() + 1);
+            if app.search.running {
+                spans.push(Span::styled("  searching transcripts…", hint));
+            }
         }
         _ => match &app.msg {
             Some((m, true)) => spans.push(Span::styled(m.clone(), Style::new().fg(th().error))),
@@ -766,7 +784,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                     (Mode::Insert, _) => "typing into claude · Ctrl-] stop typing",
                     (Mode::Compose, _) => "writing a new chat · ⏎ start · Esc back",
                     (_, Focus::Pane) => "↑↓ scroll · shift ↑↓ half page · Home/End · ⏎ type · ← back to chats",
-                    _ => "↑↓ chat · ←→ directory · ⏎ open · n new chat · Ctrl-→ pane · d kill · / filter · space menu · ? keys",
+                    _ => "↑↓ chat · ←→ directory · ⏎ open · n new chat · Ctrl-→ pane · d kill · / search · space menu · ? keys",
                 },
                 hint,
             )),
@@ -832,7 +850,7 @@ fn draw_help(f: &mut Frame) {
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
-                ("/", "filter by title or dir"),
+                ("/", "search titles, dirs and chat text"),
                 ("space", "menu"),
             ],
         ),
@@ -952,15 +970,15 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
             ],
         ),
         (Mode::Search, _) => (
-            "/ filter",
-            &[("type", "filter titles + dirs"), ("⏎", "keep filter"), ("Esc", "clear filter"), ("Ctrl-u", "clear text")],
+            "/ search",
+            &[("type", "titles, dirs + chat text"), ("⏎", "keep filter"), ("Esc", "clear filter"), ("Ctrl-u", "clear text")],
         ),
         (Mode::Space, _) => (
             "space",
             &[
                 ("n", "new chat…"),
                 ("o", "new here, no prompt"),
-                ("f", "filter"),
+                ("f", "search"),
                 ("k", "kill instance"),
                 ("l", "live-only"),
                 ("r", "rescan"),
@@ -1001,7 +1019,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("z", "expand dir"),
                 ("Tab", "next live chat"),
                 ("Ctrl-→", "focus pane"),
-                ("/", "filter"),
+                ("/", "search"),
                 ("space", "menu…"),
                 ("g  Ctrl-w", "goto… window…"),
                 (":", "command…"),
