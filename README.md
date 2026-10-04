@@ -324,3 +324,7 @@ cargo build
 cargo test
 cargo test --release -- --ignored --nocapture   # timing tests against your real history
 ```
+
+## License
+
+GPL-3.0-or-later. See [LICENSE](LICENSE).
