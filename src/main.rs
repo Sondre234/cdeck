@@ -111,7 +111,9 @@ pub struct App {
 impl App {
     fn new() -> Self {
         let mut store = Store::default();
+        store.load_cache();
         store.scan();
+        store.save_cache();
         let mut app = App {
             store,
             running: data::running(),
@@ -960,6 +962,7 @@ fn main() -> std::io::Result<()> {
     let mut last_draw = Instant::now() - Duration::from_secs(1);
     let mut last_poll = Instant::now();
     let mut last_scan = Instant::now();
+    let mut last_save = Instant::now();
     let mut dirty = true;
     while !app.quit {
         if last_poll.elapsed() >= Duration::from_millis(500) {
@@ -973,6 +976,11 @@ fn main() -> std::io::Result<()> {
             if last_scan.elapsed() >= Duration::from_secs(3) {
                 last_scan = Instant::now();
                 app.store.scan();
+            }
+            // Chats being written to dirty the cache constantly; don't rewrite it every scan.
+            if last_save.elapsed() >= Duration::from_secs(60) {
+                last_save = Instant::now();
+                app.store.save_cache();
             }
             app.rebuild();
             dirty = true;
@@ -1015,6 +1023,7 @@ fn main() -> std::io::Result<()> {
         }
     }
     app.lives.clear();
+    app.store.save_cache();
     if enhanced {
         let _ = execute!(out, PopKeyboardEnhancementFlags);
     }
