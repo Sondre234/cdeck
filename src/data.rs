@@ -407,6 +407,16 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// `cargo test --release -- --ignored --nocapture` to time startup's scan of real history.
+    #[test]
+    #[ignore]
+    fn time_startup_scan() {
+        let t = std::time::Instant::now();
+        let mut store = Store::default();
+        store.scan();
+        println!("scanned {} sessions in {:?}", store.sessions.len(), t.elapsed());
+    }
+
     /// `cargo test -- --ignored --nocapture` to time a search over real history.
     #[test]
     #[ignore]
