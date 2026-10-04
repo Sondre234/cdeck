@@ -761,7 +761,56 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
     app.preview_scroll = app.preview_scroll.min(max_scroll);
     let end = lines.len() - app.preview_scroll;
     let start = end.saturating_sub(h);
-    f.render_widget(Paragraph::new(lines[start..end].to_vec()), area);
+    let q = &app.search.query;
+    let searching = app.search.hits.contains_key(id);
+    let visible = (start..end)
+        .map(|i| if searching && owners[i].is_some() { highlight(&lines[i], q) } else { lines[i].clone() })
+        .collect::<Vec<_>>();
+    f.render_widget(Paragraph::new(visible), area);
+}
+
+/// Mark every case-insensitive occurrence of `needle` (lowercase) in the
+/// line. Matches split across spans (e.g. half bold) aren't marked.
+fn highlight(line: &Line<'static>, needle: &str) -> Line<'static> {
+    if needle.is_empty() {
+        return line.clone();
+    }
+    let mark = Style::new().bg(th().warning).fg(th().inverse).bold();
+    let mut spans = Vec::new();
+    for span in &line.spans {
+        let text = span.content.as_ref();
+        // Lowercase char by char, remembering each original char's byte range,
+        // since lowercasing can change byte lengths.
+        let mut lower = String::new();
+        let mut orig: Vec<(usize, usize)> = Vec::new();
+        for (i, c) in text.char_indices() {
+            for l in c.to_lowercase() {
+                for _ in 0..l.len_utf8() {
+                    orig.push((i, i + c.len_utf8()));
+                }
+                lower.push(l);
+            }
+        }
+        let mut done = 0;
+        for (at, _) in lower.match_indices(needle) {
+            let (s, _) = orig[at];
+            let (_, e) = orig[at + needle.len() - 1];
+            if s < done {
+                continue;
+            }
+            if s > done {
+                spans.push(Span::styled(text[done..s].to_string(), span.style));
+            }
+            spans.push(Span::styled(text[s..e].to_string(), span.style.patch(mark)));
+            done = e;
+        }
+        if done == 0 {
+            spans.push(span.clone());
+        } else if done < text.len() {
+            spans.push(Span::styled(text[done..].to_string(), span.style));
+        }
+    }
+    Line { spans, ..line.clone() }
 }
 
 /// First rendered line showing `needle` (lowercase) in a user or assistant
