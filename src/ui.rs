@@ -906,6 +906,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     if app.live_only {
         right = format!("live-only · {right}");
     }
+    if !app.notify {
+        right = format!("quiet · {right}");
+    }
     // Messages and hints give way to the counters on narrow terminals.
     let room = (area.width as usize).saturating_sub(badge.len() + 3 + right.width());
     if let Some(last) = spans.last_mut().filter(|_| app.mode != Mode::Command && app.mode != Mode::Search) {
@@ -989,6 +992,7 @@ fn draw_help(f: &mut Frame) {
                 (":open [dir]", "start claude there, no prompt (fuzzy too)"),
                 (":kill  :live", "kill instance / live-only view"),
                 (":resume!", "resume even if running elsewhere"),
+                (":notify", "desktop notifications on / off"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
         ),
@@ -1076,6 +1080,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("q / q!", "quit / force"),
                 ("Tab", "complete dir"),
                 ("⏎ / Esc", "run / cancel"),
+                ("notify", "notifications on/off"),
             ],
         ),
         (Mode::Search, _) => (

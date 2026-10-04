@@ -101,7 +101,10 @@ pub struct App {
     pub keymap: bool,
     pub tick: usize,
     confirm_resume: Option<String>,
-    was_busy: HashMap<String, bool>,
+    /// Last seen phase of each live chat, and whether Claude's status file said so.
+    phase: HashMap<String, (Phase, bool)>,
+    /// Desktop notifications when a chat finishes or needs you; `:notify` toggles.
+    pub notify: bool,
     quit: bool,
 }
 
@@ -135,10 +138,11 @@ impl App {
             preview_scroll: 0,
             pane: (24, 80),
             help: false,
-            keymap: !keymap_hidden_flag().exists(),
+            keymap: !state_file("keymap-hidden").exists(),
             tick: 0,
             confirm_resume: None,
-            was_busy: HashMap::new(),
+            phase: HashMap::new(),
+            notify: !state_file("notify-off").exists(),
             quit: false,
         };
         app.rebuild();
@@ -553,6 +557,7 @@ impl App {
                 self.live_only = !self.live_only;
                 self.rebuild();
             }
+            "notify" => self.toggle_notify(),
             "h" | "help" => self.help = true,
             _ => self.error(&format!("unknown command: {cmd}")),
         }
@@ -868,15 +873,76 @@ impl App {
         let sel = self.selected.clone();
         let ids: Vec<String> = self.lives.iter().map(|l| l.id.clone()).collect();
         for id in ids {
-            let busy = matches!(self.status(&id), Status::Busy);
-            let was = self.was_busy.insert(id.clone(), busy).unwrap_or(false);
-            let watching = sel.as_deref() == Some(id.as_str());
-            if was && !busy && !watching {
+            let (now, waiting_for) = match self.status(&id) {
+                Status::Busy => (Phase::Busy, None),
+                Status::Waiting(w) => (Phase::Waiting, Some(w.unwrap_or("input").to_string())),
+                _ => (Phase::Idle, None),
+            };
+            let trusted = self.running.contains_key(&id);
+            let was = self.phase.insert(id.clone(), (now, trusted));
+            let selected = sel.as_deref() == Some(id.as_str());
+            if was.is_some_and(|w| w.0 == Phase::Busy) && now != Phase::Busy && !selected {
                 if let Some(l) = self.live_mut(&id) {
                     l.unseen = true;
                 }
             }
+            // A selected chat only counts as watched while its pane has focus.
+            // Only Claude's own status file is trusted: the output-activity
+            // fallback flickers (redraws, resizes) and would spam.
+            let watching = selected && self.focus == Focus::Pane;
+            let was = was.filter(|w| w.1 && trusted).map(|w| w.0);
+            if let Some(what) = noteworthy(was, now).filter(|_| self.notify && !watching) {
+                let what = match what {
+                    Phase::Waiting => format!("needs you: {}", waiting_for.unwrap_or_default()),
+                    _ => "finished".into(),
+                };
+                self.notify_send(&id, &what);
+            }
         }
+        self.phase.retain(|id, _| self.lives.iter().any(|l| &l.id == id));
+    }
+
+    fn notify_send(&self, id: &str, what: &str) {
+        let (title, cwd) = match self.store.sessions.get(id) {
+            Some(s) => (s.title().to_string(), s.cwd.clone()),
+            None => ("(new session)".into(), self.live(id).map(|l| l.cwd.clone()).unwrap_or_default()),
+        };
+        let body = format!("{} · {what}", data::tilde(&cwd));
+        // Detached and best-effort: no notify-send, no notification.
+        let child = std::process::Command::new("notify-send")
+            .args(["-a", "cdeck", &title, &body])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if let Ok(mut c) = child {
+            std::thread::spawn(move || c.wait());
+        }
+    }
+
+    fn toggle_notify(&mut self) {
+        self.notify = !self.notify;
+        set_flag("notify-off", !self.notify);
+        self.info(if self.notify { "notifications on · :notify turns them off" } else { "notifications off · :notify turns them back on" });
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum Phase {
+    Idle,
+    Busy,
+    Waiting,
+}
+
+/// Which phase changes deserve a desktop notification: finishing a turn, and
+/// starting to wait. Edge-triggered, and never on first sight, so whatever
+/// was already going on when cdeck noticed a session stays quiet.
+fn noteworthy(was: Option<Phase>, now: Phase) -> Option<Phase> {
+    match (was?, now) {
+        (a, b) if a == b => None,
+        (_, Phase::Waiting) => Some(Phase::Waiting),
+        (Phase::Busy, Phase::Idle) => Some(Phase::Idle),
+        _ => None,
     }
 }
 
@@ -964,21 +1030,29 @@ fn is_leave(k: &KeyEvent) -> bool {
     k.modifiers.contains(M::CONTROL) && matches!(k.code, KeyCode::Char('\\') | KeyCode::Char('4'))
 }
 
-fn keymap_hidden_flag() -> PathBuf {
+/// Remembered choices live as empty flag files under $XDG_STATE_HOME/cdeck.
+fn state_file(name: &str) -> PathBuf {
     let state = std::env::var_os("XDG_STATE_HOME").map(PathBuf::from).unwrap_or_else(|| data::home().join(".local/state"));
-    state.join("cdeck/keymap-hidden")
+    state.join("cdeck").join(name)
+}
+
+fn set_flag(name: &str, on: bool) {
+    let flag = state_file(name);
+    if on {
+        let _ = flag.parent().map(std::fs::create_dir_all);
+        let _ = std::fs::write(&flag, "");
+    } else {
+        let _ = std::fs::remove_file(&flag);
+    }
 }
 
 impl App {
     fn toggle_keymap(&mut self) {
         self.keymap = !self.keymap;
-        let flag = keymap_hidden_flag();
+        set_flag("keymap-hidden", !self.keymap);
         if self.keymap {
-            let _ = std::fs::remove_file(&flag);
             self.info("key map on · ? hides it");
         } else {
-            let _ = flag.parent().map(std::fs::create_dir_all);
-            let _ = std::fs::write(&flag, "");
             self.info("key map hidden · ? brings it back · space ? for full help");
         }
     }
@@ -1068,5 +1142,24 @@ impl App {
         } else {
             self.select(Some(id));
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn notifies_on_finish_and_on_starting_to_wait_only() {
+        use Phase::*;
+        assert_eq!(noteworthy(None, Waiting), None, "pre-existing state stays quiet");
+        assert_eq!(noteworthy(None, Idle), None);
+        assert_eq!(noteworthy(Some(Busy), Idle), Some(Idle));
+        assert_eq!(noteworthy(Some(Busy), Waiting), Some(Waiting));
+        assert_eq!(noteworthy(Some(Idle), Waiting), Some(Waiting));
+        assert_eq!(noteworthy(Some(Waiting), Waiting), None, "once per transition");
+        assert_eq!(noteworthy(Some(Waiting), Busy), None);
+        assert_eq!(noteworthy(Some(Waiting), Idle), None);
+        assert_eq!(noteworthy(Some(Idle), Busy), None);
     }
 }
