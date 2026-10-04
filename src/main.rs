@@ -635,11 +635,17 @@ impl App {
         self.focus = Focus::Sidebar;
     }
 
-    /// Kick off a transcript search for the current filter, newest chats first.
+    /// Transcripts to search (id, file, mtime), newest first.
+    fn search_files(&self) -> Vec<(String, PathBuf, Option<SystemTime>)> {
+        let mut files: Vec<_> = self.store.visible().map(|s| (s.id.clone(), s.file.clone(), s.mtime)).collect();
+        files.sort_by(|a, b| b.2.cmp(&a.2));
+        files
+    }
+
+    /// Kick off a transcript search for the current filter.
     fn update_search(&mut self) {
-        let mut files: Vec<_> = self.store.visible().map(|s| (s.mtime, s.id.clone(), s.file.clone())).collect();
-        files.sort_by(|a, b| b.0.cmp(&a.0));
-        self.search.start(&self.filter, files.into_iter().map(|(_, id, f)| (id, f)).collect());
+        let files = self.search_files().into_iter().map(|(id, f, _)| (id, f)).collect();
+        self.search.start(&self.filter, files);
         self.jump_to_match = self.selected.clone();
     }
 
@@ -949,6 +955,9 @@ fn main() -> std::io::Result<()> {
             if last_scan.elapsed() >= Duration::from_secs(3) {
                 last_scan = Instant::now();
                 app.store.scan();
+                // Chats that grew may match now.
+                let files = app.search_files();
+                app.search.rescan(files);
             }
             app.rebuild();
             dirty = true;
