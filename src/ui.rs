@@ -278,10 +278,13 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 lines.push(line);
                 // Matched inside the transcript: show where.
                 if let Some(snip) = &it.snippet {
-                    let mut line = Line::from(vec![
-                        Span::styled("  │   ", Style::new().fg(c)),
-                        Span::styled(trunc(snip, w.saturating_sub(7)), Style::new().fg(th().faint).italic()),
-                    ]);
+                    let mut line = highlight(
+                        &Line::from(vec![
+                            Span::styled("  │   ", Style::new().fg(c)),
+                            Span::styled(trunc(snip, w.saturating_sub(7)), Style::new().fg(th().faint).italic()),
+                        ]),
+                        &app.search.query,
+                    );
                     if selected {
                         line = line.style(Style::new().bg(sel_bg));
                     }
