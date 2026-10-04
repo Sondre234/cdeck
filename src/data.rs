@@ -1,7 +1,7 @@
 //! Reading Claude Code's on-disk state: session transcripts under
 //! ~/.claude/projects and the per-process status files under ~/.claude/sessions.
 
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{Read, Seek, SeekFrom};
@@ -91,6 +91,36 @@ impl Session {
         }
     }
 
+    fn to_json(&self) -> Option<Value> {
+        let ms = |t: SystemTime| t.duration_since(SystemTime::UNIX_EPOCH).ok().map(|d| d.as_millis() as u64);
+        Some(json!({
+            "id": self.id,
+            "file": self.file.to_str()?,
+            "offset": self.offset,
+            "mtime": self.mtime.and_then(ms),
+            "cwd": self.cwd.to_str()?,
+            "branch": self.branch,
+            "ai_title": self.ai_title,
+            "custom_title": self.custom_title,
+            "first_prompt": self.first_prompt,
+        }))
+    }
+
+    fn from_json(v: &Value) -> Option<Session> {
+        let s = |k: &str| v[k].as_str().map(String::from);
+        Some(Session {
+            id: s("id")?,
+            file: s("file")?.into(),
+            offset: v["offset"].as_u64()?,
+            mtime: v["mtime"].as_u64().map(|ms| SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(ms)),
+            cwd: s("cwd")?.into(),
+            branch: s("branch"),
+            ai_title: s("ai_title"),
+            custom_title: s("custom_title"),
+            first_prompt: s("first_prompt"),
+        })
+    }
+
     fn ingest(&mut self, line: &[u8]) {
         let Ok(line) = std::str::from_utf8(line) else { return };
         // History can be hundreds of MB, so cwd/branch are plucked out with
@@ -152,16 +182,32 @@ fn user_text(content: &Value) -> Option<String> {
     }
 }
 
+/// Bump whenever the cache's shape or what `Session::ingest` extracts changes.
+const CACHE_VERSION: u64 = 1;
+
+/// Parse state survives restarts here, so startup only reads what was
+/// appended since (history runs to hundreds of MB).
+pub fn cache_file() -> PathBuf {
+    let cache = std::env::var_os("XDG_CACHE_HOME").map(PathBuf::from).unwrap_or_else(|| home().join(".cache"));
+    cache.join("cdeck/sessions.json")
+}
+
 /// Keeps every transcript we've seen, re-reading only appended bytes.
 #[derive(Default)]
 pub struct Store {
     pub sessions: HashMap<String, Session>,
+    /// Parse state changed since the cache was last written.
+    dirty: bool,
 }
 
 impl Store {
     pub fn scan(&mut self) {
-        let root = claude_dir().join("projects");
-        let Ok(dirs) = fs::read_dir(&root) else { return };
+        self.scan_root(&claude_dir().join("projects"));
+    }
+
+    fn scan_root(&mut self, root: &Path) {
+        let Ok(dirs) = fs::read_dir(root) else { return };
+        let mut seen = std::collections::HashSet::new();
         for d in dirs.flatten() {
             let Ok(files) = fs::read_dir(d.path()) else { continue };
             for f in files.flatten() {
@@ -171,16 +217,67 @@ impl Store {
                 }
                 let Some(id) = p.file_stem().and_then(|s| s.to_str()).map(String::from) else { continue };
                 let Ok(md) = f.metadata() else { continue };
+                seen.insert(id.clone());
                 let s = self
                     .sessions
                     .entry(id.clone())
-                    .or_insert_with(|| Session { id, file: p.clone(), ..Default::default() });
-                s.file = p;
+                    .or_insert_with(|| Session { id: id.clone(), file: p.clone(), ..Default::default() });
+                if s.file != p {
+                    // The same id in two projects: first one wins, so they don't
+                    // take turns being reparsed. A moved file starts over.
+                    if s.file.exists() {
+                        continue;
+                    }
+                    *s = Session { id, file: p, ..Default::default() };
+                }
                 s.mtime = md.modified().ok();
                 if md.len() != s.offset {
+                    let before = s.offset;
                     s.update(md.len());
+                    self.dirty |= s.offset != before;
                 }
             }
+        }
+        // Deleted transcripts would otherwise live on in the cache.
+        let n = self.sessions.len();
+        self.sessions.retain(|id, _| seen.contains(id));
+        self.dirty |= self.sessions.len() != n;
+    }
+
+    /// Pick up where the last run left off. A missing, corrupt or outdated
+    /// cache just means a full scan.
+    pub fn load_cache(&mut self) {
+        self.load(&cache_file());
+    }
+
+    fn load(&mut self, path: &Path) {
+        let Ok(txt) = fs::read_to_string(path) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(&txt) else { return };
+        if v["version"].as_u64() != Some(CACHE_VERSION) {
+            return;
+        }
+        for s in v["sessions"].as_array().into_iter().flatten().filter_map(Session::from_json) {
+            self.sessions.insert(s.id.clone(), s);
+        }
+    }
+
+    /// Write the cache if anything changed; best-effort.
+    pub fn save_cache(&mut self) {
+        if self.dirty {
+            self.save(&cache_file());
+        }
+    }
+
+    fn save(&mut self, path: &Path) {
+        let sessions: Vec<Value> = self.sessions.values().filter_map(Session::to_json).collect();
+        let txt = json!({ "version": CACHE_VERSION, "sessions": sessions }).to_string();
+        // Write-then-rename so a crash or a second cdeck never leaves half a file.
+        let tmp = path.with_extension(format!("tmp{}", std::process::id()));
+        let _ = path.parent().map(fs::create_dir_all);
+        if fs::write(&tmp, txt).is_ok() && fs::rename(&tmp, path).is_ok() {
+            self.dirty = false;
+        } else {
+            let _ = fs::remove_file(&tmp);
         }
     }
 
@@ -407,6 +504,60 @@ mod tests {
         fs::remove_dir_all(&dir).unwrap();
     }
 
+    #[test]
+    fn cache_resumes_parsing_and_survives_rewrites() {
+        let dir = std::env::temp_dir().join(format!("cdeck-cache-test-{}", std::process::id()));
+        let root = dir.join("projects");
+        fs::create_dir_all(root.join("p")).unwrap();
+        let file = root.join("p/abc.jsonl");
+        let cache = dir.join("cache.json");
+        let user = |t: &str| format!("{{\"type\":\"user\",\"cwd\":\"/x\",\"message\":{{\"content\":\"{t}\"}}}}\n");
+        fs::write(&file, user("first")).unwrap();
+        let mut a = Store::default();
+        a.scan_root(&root);
+        a.save(&cache);
+        assert!(!a.dirty);
+
+        // Loaded state is trusted: nothing already parsed is read again.
+        let txt = fs::read_to_string(&cache).unwrap().replace("\"first\"", "\"from cache\"");
+        fs::write(&cache, &txt).unwrap();
+        let mut b = Store::default();
+        b.load(&cache);
+        b.scan_root(&root);
+        assert_eq!(b.sessions["abc"].title(), "from cache");
+        assert_eq!(b.sessions["abc"].cwd, Path::new("/x"));
+        assert!(!b.dirty);
+
+        // Appended titles are picked up.
+        fs::write(&file, user("first") + "{\"type\":\"ai-title\",\"aiTitle\":\"Named\"}\n").unwrap();
+        b.scan_root(&root);
+        assert_eq!(b.sessions["abc"].title(), "Named");
+        assert!(b.dirty);
+
+        // Shorter than what was parsed: rewritten, so start over.
+        fs::write(&file, user("new")).unwrap();
+        fs::write(&cache, txt.replace(&format!("\"offset\":{}", user("first").len()), "\"offset\":999")).unwrap();
+        let mut c = Store::default();
+        c.load(&cache);
+        assert_eq!(c.sessions["abc"].offset, 999);
+        c.scan_root(&root);
+        assert_eq!(c.sessions["abc"].title(), "new");
+
+        // Corrupt or outdated caches are ignored.
+        for bad in ["{not json".to_string(), txt.replace("\"version\":1", "\"version\":0")] {
+            fs::write(&cache, bad).unwrap();
+            let mut d = Store::default();
+            d.load(&cache);
+            assert!(d.sessions.is_empty());
+        }
+
+        // Deleted transcripts drop out.
+        fs::remove_file(&file).unwrap();
+        c.scan_root(&root);
+        assert!(c.sessions.is_empty() && c.dirty);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
     /// `cargo test --release -- --ignored --nocapture` to time startup's scan of real history.
     #[test]
     #[ignore]
@@ -415,6 +566,16 @@ mod tests {
         let mut store = Store::default();
         store.scan();
         println!("scanned {} sessions in {:?}", store.sessions.len(), t.elapsed());
+        let cache = std::env::temp_dir().join(format!("cdeck-time-{}.json", std::process::id()));
+        let t = std::time::Instant::now();
+        store.save(&cache);
+        println!("saved the cache ({} KB) in {:?}", fs::metadata(&cache).unwrap().len() / 1024, t.elapsed());
+        let t = std::time::Instant::now();
+        let mut store = Store::default();
+        store.load(&cache);
+        store.scan();
+        println!("loaded the cache and rescanned in {:?}", t.elapsed());
+        fs::remove_file(&cache).unwrap();
     }
 
     /// `cargo test -- --ignored --nocapture` to time a search over real history.
