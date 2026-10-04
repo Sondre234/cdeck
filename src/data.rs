@@ -439,6 +439,13 @@ pub struct Tool {
     pub result: Option<(Vec<String>, usize)>,
 }
 
+#[cfg(test)]
+impl Tool {
+    pub fn new(call: &str) -> Self {
+        Tool { call: call.into(), id: String::new(), result: None }
+    }
+}
+
 /// Lines of a tool result kept for the preview; the rest are only counted.
 pub const RESULT_LINES: usize = 6;
 

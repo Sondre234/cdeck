@@ -1,3 +1,4 @@
+mod clip;
 mod data;
 mod dirpick;
 mod theme;
@@ -661,6 +662,20 @@ impl App {
         }
     }
 
+    /// y / Y: Claude's last reply, or the whole chat as Markdown, read from
+    /// the transcript so it works the same for live and dormant chats.
+    fn copy_selected(&mut self, all: bool) {
+        let Some(item) = self.selected_item().cloned() else { return self.error("select a chat to copy") };
+        let entries = self.store.sessions.get(&item.id).map(|s| data::transcript(&s.file)).unwrap_or_default();
+        let text = if all { (!entries.is_empty()).then(|| clip::markdown(&item.title, &entries)) } else { clip::last_reply(&entries) };
+        let Some(text) = text else { return self.error("nothing to copy yet") };
+        let what = if all { "the chat" } else { "Claude's last reply" };
+        match clip::copy(&text) {
+            Ok(via) => self.info(&format!("copied {what} · {} chars via {via}", ui::compact(text.chars().count() as u64))),
+            Err(e) => self.error(&format!("couldn't copy: {e}")),
+        }
+    }
+
     fn toggle_tools(&mut self) {
         self.show_tools = !self.show_tools;
         let id = self.selected.clone().unwrap_or_default();
@@ -760,6 +775,9 @@ impl App {
             "notify" => self.toggle_notify(),
             "mouse" => self.toggle_mouse(),
             "tools" => self.toggle_tools(),
+            "copy" if arg.is_empty() => self.copy_selected(false),
+            "copy" if arg == "all" => self.copy_selected(true),
+            "copy" => self.error("usage: :copy (last reply) or :copy all (whole chat)"),
             "h" | "help" => self.help = true,
             _ => self.error(&format!("unknown command: {cmd}")),
         }
@@ -1046,6 +1064,8 @@ impl App {
                     KeyCode::Char('r') => self.refresh(),
                     KeyCode::Char('z') => self.toggle_group(),
                     KeyCode::Char('M') => self.toggle_mouse(),
+                    KeyCode::Char('y') => self.copy_selected(false),
+                    KeyCode::Char('Y') => self.copy_selected(true),
                     KeyCode::Tab => self.cycle_live(true),
                     KeyCode::BackTab => self.cycle_live(false),
                     KeyCode::Esc => {

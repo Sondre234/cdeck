@@ -63,8 +63,8 @@ fn basename(p: &Path) -> String {
     p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| data::tilde(p))
 }
 
-/// `816`, `12.3k`, `1.2M`: token counts short enough for a title bar.
-fn tokens(n: u64) -> String {
+/// `816`, `12.3k`, `1.2M`: counts short enough for a title bar.
+pub fn compact(n: u64) -> String {
     match n {
         0..1000 => n.to_string(),
         1000..999_950 => format!("{:.1}k", n as f64 / 1e3),
@@ -415,7 +415,7 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
     }
     // Tokens, not dollars: on a subscription the bill doesn't change.
     if let Some(u) = app.store.sessions.get(&item.id).map(|s| s.usage()).filter(|u| u.output > 0) {
-        let t = format!(" · {} out · {} in", tokens(u.output), tokens(u.input_total()));
+        let t = format!(" · {} out · {} in", compact(u.output), compact(u.input_total()));
         right.push(Span::styled(t, Style::new().fg(th().faint)));
     }
     right.push(Span::styled(format!("  {} ", &item.id[..8.min(item.id.len())]), Style::new().fg(th().border)));
@@ -1003,7 +1003,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let mut right = format!("{} live · {chats} chats ", app.lives.len());
     let today = app.store.usage_today().output;
     if today > 0 {
-        right = format!("{} out today · {right}", tokens(today));
+        right = format!("{} out today · {right}", compact(today));
     }
     if app.show_archived {
         right = format!("{archived} archived · {right}");
@@ -1073,6 +1073,7 @@ fn draw_help(f: &mut Frame) {
                 ("p", "pin / unpin: keep it at the top"),
                 ("x", "archive: hide it (transcript kept)"),
                 ("E", "open in its own terminal window"),
+                ("y Y", "copy claude's last reply / whole chat (md)"),
                 ("z", "expand / fold a directory"),
                 ("M", "mouse capture off / on, for native selection"),
                 ("Ctrl-l", "redraw the screen if it looks broken"),
@@ -1120,6 +1121,7 @@ fn draw_help(f: &mut Frame) {
                 (":notify", "desktop notifications on / off"),
                 (":mouse", "mouse capture off / on, like M"),
                 (":tools", "tool output in previews on / off, like t"),
+                (":copy [all]", "copy last reply / whole chat, like y Y"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
         ),
@@ -1236,6 +1238,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("notify", "notifications on/off"),
                 ("mouse", "mouse capture on/off"),
                 ("tools", "tool output on/off"),
+                ("copy [all]", "copy reply / chat"),
             ],
         ),
         (Mode::Search, _) => (
@@ -1284,6 +1287,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("← Esc", "back to list"),
                 ("Tab", "next live chat"),
                 ("d", "kill"),
+                ("y Y", "copy reply / all"),
                 ("space", "menu…"),
                 ("?", "hide this map"),
             ],
@@ -1301,7 +1305,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("n", "new chat"),
                 ("d", "kill"),
                 ("space", "menu…"),
-                ("M", "mouse on/off"),
+                ("y Y", "copy reply / all"),
                 ("?", "hide this map"),
             ],
         ),
@@ -1378,7 +1382,7 @@ mod tests {
 
     #[test]
     fn token_counts_stay_short() {
-        assert_eq!([0, 816, 1000, 12_345, 999_949, 999_950, 1_234_567].map(tokens), ["0", "816", "1.0k", "12.3k", "999.9k", "1.0M", "1.2M"]);
+        assert_eq!([0, 816, 1000, 12_345, 999_949, 999_950, 1_234_567].map(compact), ["0", "816", "1.0k", "12.3k", "999.9k", "1.0M", "1.2M"]);
     }
 
     #[test]

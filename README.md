@@ -17,7 +17,8 @@ cargo install --path .
 ```
 
 Needs `claude` on your `$PATH`. Optional: `notify-send` (notifications),
-`zoxide` (more directories in the picker), a terminal emulator for `E`.
+`zoxide` (more directories in the picker), a terminal emulator for `E`,
+`wl-copy` or `xclip` for `y`/`Y` (otherwise the terminal is asked via OSC 52).
 
 ## Layout
 
@@ -71,6 +72,8 @@ The footer badge shows the current mode.
 | `p` | pin / unpin (pinned chats sit at the top) |
 | `x` | archive / unarchive (hides it; transcript untouched) |
 | `E` | open in its own terminal window |
+| `y` | copy Claude's last reply (works from the pane too) |
+| `Y` | copy the whole chat as Markdown (`## You` / `## Claude`, tool calls as `> ⚙ …`) |
 | `z` | expand / fold a directory |
 | `Tab` `Shift-Tab` | cycle through live chats |
 | `/` | search (see below) |
@@ -99,6 +102,7 @@ The footer badge shows the current mode.
 | `PageDown` `PageUp` | scroll a page |
 | `Home` `End` | top / bottom |
 | `n` `N` | next / previous search match (when the chat matched a search) |
+| `y` `Y` | copy Claude's last reply / the whole chat as Markdown |
 | `t` | show / hide tool output in transcript previews (first 6 lines of each result, under its call) |
 | `Enter` | start typing into Claude |
 | `←` `Esc` | back to the chat list |
@@ -188,6 +192,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:notify` | desktop notifications on / off |
 | `:mouse` | mouse capture on / off |
 | `:tools` | tool output in transcript previews on / off, like `t` |
+| `:copy` / `:copy all` | copy Claude's last reply / the whole chat, like `y` / `Y` |
 | `:refresh` / `:r` | rescan transcripts |
 | `:help` / `:h` | full help |
 | `:q` / `:q!` | quit / quit and kill live instances (transcripts are kept) |
