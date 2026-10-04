@@ -62,6 +62,12 @@ pub struct Item {
     pub snippet: Option<String>,
 }
 
+pub type Wrapped = (String, u64, u16, Vec<ratatui::text::Line<'static>>, Vec<Option<usize>>);
+
+/// Preview state of the split's right half (transcript, rendering, scroll),
+/// swapped into the main fields while that half is drawn or scrolled.
+pub type SplitView = (Option<(String, u64, Vec<Entry>)>, Option<Wrapped>, usize);
+
 pub enum Status<'a> {
     Busy,
     Waiting(Option<&'a str>),
@@ -91,7 +97,7 @@ pub struct App {
     pub preview: Option<(String, u64, Vec<Entry>)>,
     /// Rendered preview, plus which transcript entry each line came from
     /// (None for tool calls, which search skips).
-    pub wrapped: Option<(String, u64, u16, Vec<ratatui::text::Line<'static>>, Vec<Option<usize>>)>,
+    pub wrapped: Option<Wrapped>,
     /// Chat whose preview should scroll to the search match once it's known.
     pub jump_to_match: Option<String>,
     /// Match n/N last landed on (chat, line, preview_scroll), so stepping
@@ -103,6 +109,12 @@ pub struct App {
     pub preview_scroll: usize,
     pub pane: (u16, u16),
     pub help: bool,
+    /// Chat held in the right half of a split pane (`Ctrl-w v`); the left
+    /// half keeps following the selection.
+    pub split: Option<String>,
+    pub split_view: SplitView,
+    /// Below `narrow_width`: list and pane take turns, and nothing splits.
+    pub narrow: bool,
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
     pub keymap: bool,
     pub pinned: HashSet<String>,
@@ -158,6 +170,9 @@ impl App {
             preview_scroll: 0,
             pane: (24, 80),
             help: false,
+            split: None,
+            split_view: Default::default(),
+            narrow: false,
             keymap: !state_file("keymap-hidden").exists(),
             pinned: load_ids("pinned"),
             archived: load_ids("archived"),
@@ -205,6 +220,20 @@ impl App {
     /// A local name wins over whatever Claude called the chat.
     fn title_of(&self, s: &data::Session) -> String {
         self.names.get(&s.id).cloned().unwrap_or_else(|| s.title().into())
+    }
+
+    /// A chat's list entry, or one made up for a chat the list currently
+    /// hides (filtered out, say) but the split still shows.
+    pub fn find_item(&self, id: &str) -> Option<Item> {
+        let listed = self.rows.iter().find_map(|r| match r {
+            Row::Item(i) if i.id == id => Some(i.clone()),
+            _ => None,
+        });
+        listed.or_else(|| {
+            let placeholder = self.live(id).map(|l| data::Session::new_placeholder(&l.id, &l.cwd));
+            let s = self.store.sessions.get(id).or(placeholder.as_ref())?;
+            Some(Item { id: s.id.clone(), cwd: s.cwd.clone(), title: self.title_of(s), branch: s.branch.clone(), mtime: s.mtime, snippet: None })
+        })
     }
 
     pub fn selected_item(&self) -> Option<&Item> {
@@ -308,7 +337,8 @@ impl App {
                     || shown < config::cfg().group_limit
                     || self.live(&i.id).is_some()
                     || self.running.contains_key(&i.id)
-                    || self.selected.as_deref() == Some(i.id.as_str());
+                    || self.selected.as_deref() == Some(i.id.as_str())
+                    || self.split.as_deref() == Some(i.id.as_str());
                 if keep {
                     shown += 1;
                     items.push(Row::Item(i));
@@ -806,6 +836,22 @@ impl App {
         self.rebuild();
     }
 
+    /// Ctrl-w v: keep the selected chat in a right half while the left half
+    /// follows the selection, so two chats can be watched side by side.
+    fn split_pane(&mut self) {
+        if self.narrow {
+            return self.error("too narrow to split — widen the window (narrow_width in the config)");
+        }
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to split off") };
+        self.split = Some(id);
+        self.info("split · the right half keeps this chat, the left follows the selection · Ctrl-w q closes");
+    }
+
+    fn unsplit(&mut self) {
+        self.split = None;
+        self.split_view = Default::default();
+    }
+
     fn toggle_focus(&mut self) {
         self.focus = match self.focus {
             Focus::Sidebar => Focus::Pane,
@@ -1001,6 +1047,8 @@ impl App {
                     KeyCode::Left | KeyCode::Char('h') => self.focus = Focus::Sidebar,
                     KeyCode::Right | KeyCode::Char('l') => self.focus = Focus::Pane,
                     KeyCode::Char('w') => self.toggle_focus(),
+                    KeyCode::Char('v') => self.split_pane(),
+                    KeyCode::Char('q') | KeyCode::Char('o') => self.unsplit(),
                     _ => {}
                 }
             }
@@ -1233,6 +1281,7 @@ fn main() -> std::io::Result<()> {
             // Switching Claude Code themes recolours cdeck live.
             if theme::reload_if_changed() {
                 app.wrapped = None;
+                app.split_view.1 = None;
             }
             if last_scan.elapsed() >= Duration::from_secs(3) {
                 last_scan = Instant::now();
@@ -1268,7 +1317,11 @@ fn main() -> std::io::Result<()> {
             resized_at = None;
             dirty = true;
         }
-        let pane = ui::pane_size(size.into(), app.keymap);
+        app.narrow = ui::is_narrow(size.into());
+        if app.narrow && app.split.is_some() {
+            app.unsplit();
+        }
+        let pane = ui::pane_size(size.into(), app.keymap, false);
         app.pane = pane;
         for l in &mut app.lives {
             l.resize(pane);
@@ -1385,6 +1438,8 @@ impl App {
 #[derive(Default)]
 pub struct Hits {
     pub side: ratatui::layout::Rect,
+    /// The split's right half; empty when not split.
+    pub split: ratatui::layout::Rect,
     pub list: ratatui::layout::Rect,
     /// Row index for each visible line of the chat list (None = spacer).
     pub rows: Vec<Option<usize>>,

@@ -86,6 +86,16 @@ search) and is stored in cdeck's own state; `~/.claude` is never written.
 | `Ctrl-→` `Ctrl-←` | focus pane / chat list |
 | `Ctrl-w l` `Ctrl-w h` / `g→` `g←` | same, helix window style |
 | `Ctrl-w w` | swap focus |
+| `Ctrl-w v` | split the pane: keep the selected chat on the right |
+| `Ctrl-w q` `Ctrl-w o` | close the split |
+
+### Split pane
+
+`Ctrl-w v` shows two chats side by side: the chat selected when you pressed it
+stays in the right half, and the left half keeps following the selection, so you
+can watch one chat while browsing or typing in others. `Ctrl-w v` again moves
+the right half to the current selection. Narrow windows (below `narrow_width`)
+never split; shrinking one closes the split.
 
 ### Pane focused (transcript preview or live session, not typing)
 

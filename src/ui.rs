@@ -49,9 +49,17 @@ fn split_areas(area: Rect, keymap: bool) -> (Rect, Rect, Rect, Rect) {
     (side, pane, map, footer)
 }
 
+/// The pane cut into two equally wide halves around a divider, so a chat
+/// is the same size whichever half shows it.
+pub fn halves(pane: Rect) -> (Rect, Rect) {
+    let w = pane.width.saturating_sub(1) / 2;
+    (Rect { width: w, ..pane }, Rect { x: pane.right() - w, width: w, ..pane })
+}
+
 /// (rows, cols) available to a Claude instance; the pane loses two rows to its title bar.
-pub fn pane_size(area: Rect, keymap: bool) -> (u16, u16) {
+pub fn pane_size(area: Rect, keymap: bool, split: bool) -> (u16, u16) {
     let (_, pane, _, _) = split_areas(area, keymap);
+    let pane = if split { halves(pane).0 } else { pane };
     (pane.height.saturating_sub(2).max(1), pane.width.max(1))
 }
 
@@ -116,8 +124,16 @@ pub fn draw(f: &mut Frame, app: &mut App) {
         app.hits.list = Rect::default();
         app.hits.rows.clear();
     }
-    if !narrow || app.focus == Focus::Pane {
-        draw_pane(f, app, pane);
+    app.hits.split = Rect::default();
+    if let Some(right) = app.split.clone().filter(|_| !narrow) {
+        let (l, r) = halves(pane);
+        draw_pane(f, app, l, app.selected.clone(), false);
+        let gap = Rect { x: l.right(), width: r.x - l.right(), ..pane };
+        let rule = Block::new().borders(Borders::LEFT).border_style(Style::new().fg(th().border));
+        f.render_widget(rule, gap);
+        draw_pane(f, app, r, Some(right), true);
+    } else if !narrow || app.focus == Focus::Pane {
+        draw_pane(f, app, pane, app.selected.clone(), false);
     } else {
         app.hits.pane = Rect::default();
     }
@@ -150,7 +166,11 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ("q", "quit"),
             ],
         ),
-        Mode::Window => popup(f, "window", &[("←", "focus chat list"), ("→", "focus right pane"), ("w", "swap focus")]),
+        Mode::Window => popup(
+            f,
+            "window",
+            &[("←", "focus chat list"), ("→", "focus right pane"), ("w", "swap focus"), ("v", "split: keep this chat on the right"), ("q o", "close the split")],
+        ),
         Mode::Goto => popup(
             f,
             "goto",
@@ -366,21 +386,27 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_widget(Paragraph::new(visible), list);
 }
 
-fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
+/// One chat in `area`: the selection, or (`in_split`) the split's right half.
+fn draw_pane(f: &mut Frame, app: &mut App, area: Rect, id: Option<String>, in_split: bool) {
     f.render_widget(Block::new().style(Style::new().bg(Color::Reset).fg(Color::Reset)), area);
     let [head, body] = Layout::vertical([Constraint::Length(2), Constraint::Fill(1)]).areas(area);
-    app.hits.pane = area;
-    if app.selected.as_deref() == Some(NEW_CHAT) || app.selected_item().is_none() {
-        return draw_new_chat(f, app, area);
+    if in_split {
+        app.hits.split = area;
+    } else {
+        app.hits.pane = area;
     }
-    let item = app.selected_item().cloned().unwrap();
+    let item = id.as_deref().filter(|&i| i != NEW_CHAT).and_then(|i| app.find_item(i));
+    let Some(item) = item else { return draw_new_chat(f, app, area) };
     let c = dir_color(&item.cwd);
 
     // Title bar: directory chip, path and branch, chat title, status.
+    // A split half is too narrow for the path, branch and id; the title matters more.
+    let compact = head.width < 90;
     let (label, label_color) = match app.status(&item.id) {
         Status::Busy => ("working".to_string(), th().accent),
         Status::Waiting(w) => (format!("needs you: {}", w.unwrap_or("input")), th().warning),
         Status::Idle { .. } => ("idle".into(), th().success),
+        Status::External { status, .. } if compact => (format!("elsewhere · {status}"), th().external),
         Status::External { pid, status } => (format!("in another terminal · pid {pid} · {status}"), th().external),
         Status::Dormant => ("⏎ resume".into(), th().faint),
     };
@@ -389,9 +415,9 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
     let mut spans = vec![
         Span::raw(" "),
         Span::styled(format!(" {} ", basename(&item.cwd)), Style::new().bg(c).fg(th().inverse).bold()),
-        Span::styled(chip_path(&item.cwd), Style::new().fg(c)),
+        Span::styled(if compact { String::new() } else { chip_path(&item.cwd) }, Style::new().fg(c)),
     ];
-    if let Some(b) = &item.branch {
+    if let Some(b) = item.branch.as_ref().filter(|_| !compact) {
         spans.push(Span::styled(format!("   {b}"), Style::new().fg(th().faint)));
     }
     // "working" shimmers like Claude Code's own spinner text.
@@ -403,7 +429,8 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
     if scrolled > 0 {
         right.push(Span::styled(format!(" · ↑{scrolled}"), Style::new().fg(th().muted)));
     }
-    right.push(Span::styled(format!("  {} ", &item.id[..8.min(item.id.len())]), Style::new().fg(th().border)));
+    let short_id = if compact { "" } else { &item.id[..8.min(item.id.len())] };
+    right.push(Span::styled(format!("  {short_id} "), Style::new().fg(th().border)));
     let used: usize = spans.iter().chain(&right).map(|s| s.content.width()).sum();
     let title = trunc(&item.title, w.saturating_sub(used + 6));
     spans.push(Span::styled("  ·  ", Style::new().fg(th().border)));
@@ -420,9 +447,20 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
             let (r, col) = screen.cursor_position();
             f.set_cursor_position(Position::new(body.x + col, body.y + r));
         }
+    } else if in_split {
+        swap_split_view(app);
+        draw_preview(f, app, &item.id, body);
+        swap_split_view(app);
     } else {
         draw_preview(f, app, &item.id, body);
     }
+}
+
+/// Lets the right half reuse the preview code with its own cache and scroll.
+pub fn swap_split_view(app: &mut App) {
+    std::mem::swap(&mut app.preview, &mut app.split_view.0);
+    std::mem::swap(&mut app.wrapped, &mut app.split_view.1);
+    std::mem::swap(&mut app.preview_scroll, &mut app.split_view.2);
 }
 
 fn greeting() -> String {
@@ -1033,6 +1071,8 @@ fn draw_help(f: &mut Frame) {
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
+                ("Ctrl-w v", "split: keep this chat on the right"),
+                ("Ctrl-w q", "close the split (also Ctrl-w o)"),
                 ("/", "search titles, dirs and chat text"),
                 ("  dir:x", "only chats whose dir contains x"),
                 ("  age:<7d", "newer than 7d (age:>2w older; m h d w)"),
@@ -1224,7 +1264,10 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
             "g",
             &[("g", "first chat"), ("e", "last chat"), ("n", "next dir"), ("p", "prev dir"), ("←", "focus list"), ("→", "focus pane")],
         ),
-        (Mode::Window, _) => ("Ctrl-w", &[("←", "focus list"), ("→", "focus pane"), ("w", "swap focus")]),
+        (Mode::Window, _) => (
+            "Ctrl-w",
+            &[("←", "focus list"), ("→", "focus pane"), ("w", "swap focus"), ("v", "split pane"), ("q o", "close split")],
+        ),
         (Mode::Normal, Focus::Pane) if app.has_matches() => (
             "pane · search matches",
             &[
@@ -1318,6 +1361,27 @@ fn draw_keymap(f: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn halves_are_equal_and_leave_room_for_the_divider() {
+        for w in [80u16, 81, 120, 3] {
+            let pane = Rect::new(30, 1, w, 20);
+            let (l, r) = halves(pane);
+            assert_eq!(l.width, r.width, "width {w}");
+            assert_eq!((l.x, r.right()), (pane.x, pane.right()));
+            assert!(r.x > l.right(), "a divider column between them at width {w}");
+            assert_eq!((l.height, r.height), (20, 20));
+        }
+    }
+
+    #[test]
+    fn split_sizes_lives_to_half_the_pane() {
+        let area = Rect::new(0, 0, 160, 40);
+        let (rows, full) = pane_size(area, false, false);
+        let (half_rows, half) = pane_size(area, false, true);
+        assert_eq!(rows, half_rows);
+        assert_eq!(half, (full - 1) / 2);
+    }
 
     #[test]
     fn stamps_get_coarser_with_age() {
