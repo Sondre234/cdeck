@@ -5,6 +5,7 @@ mod keys;
 mod live;
 mod search;
 mod ui;
+mod window;
 
 use crossterm::event::{
     MouseButton, MouseEvent, MouseEventKind,
@@ -107,6 +108,7 @@ pub struct App {
     pub show_archived: bool,
     pub tick: usize,
     confirm_resume: Option<String>,
+    confirm_window: Option<String>,
     was_busy: HashMap<String, bool>,
     quit: bool,
 }
@@ -147,6 +149,7 @@ impl App {
             show_archived: false,
             tick: 0,
             confirm_resume: None,
+            confirm_window: None,
             was_busy: HashMap::new(),
             quit: false,
         };
@@ -411,6 +414,7 @@ impl App {
             self.preview_scroll = 0;
             self.jump_to_match = self.selected.clone();
             self.confirm_resume = None;
+            self.confirm_window = None;
             if let Some(cwd) = self.selected_item().map(|i| i.cwd.clone()) {
                 self.last_dir = Some(cwd);
             }
@@ -534,6 +538,34 @@ impl App {
         }
     }
 
+    /// The selected chat (or a fresh one in its directory) in a terminal window
+    /// of its own, for when you want it next to cdeck rather than inside it.
+    fn open_window(&mut self, force: bool) {
+        let prog = std::env::var("CDECK_CLAUDE").unwrap_or_else(|_| "claude".into());
+        let item = self.selected_item().cloned();
+        let (dir, cmd) = match &item {
+            Some(it) => (it.cwd.clone(), vec![prog, "--resume".into(), it.id.clone()]),
+            None => (self.selected_dir(), vec![prog]),
+        };
+        if let Some(it) = &item {
+            // Two copies of one session would both write to the same transcript.
+            let here = self.live(&it.id).is_some();
+            if (here || self.running.contains_key(&it.id)) && !force && self.confirm_window.as_deref() != Some(it.id.as_str()) {
+                self.confirm_window = Some(it.id.clone());
+                let place = if here { "in cdeck" } else { "elsewhere" };
+                return self.error(&format!("already running {place} — E again opens a second copy"));
+            }
+        }
+        if !dir.is_dir() {
+            return self.error(&format!("{} does not exist", data::tilde(&dir)));
+        }
+        let Some(term) = window::terminal() else { return self.error("no terminal found — set $TERMINAL") };
+        match window::launch(&window::command(&term, &dir, &cmd), &dir) {
+            Ok(()) => self.info(&format!("opened in a new {} window", term[0])),
+            Err(e) => self.error(&format!("couldn't start {}: {e}", term[0])),
+        }
+    }
+
     fn toggle_pin(&mut self) {
         let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to pin") };
         let pinned = !self.pinned.remove(&id);
@@ -640,6 +672,7 @@ impl App {
             "k" | "kill" => self.kill_selected(),
             "fork" => self.fork_selected(),
             "pin" => self.toggle_pin(),
+            "win" | "win!" => self.open_window(cmd.ends_with('!')),
             "archive" => self.toggle_archive(),
             "archived" => self.toggle_show_archived(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
@@ -832,6 +865,7 @@ impl App {
                     KeyCode::Char('p') => self.toggle_pin(),
                     KeyCode::Char('x') => self.toggle_archive(),
                     KeyCode::Char('a') => self.toggle_show_archived(),
+                    KeyCode::Char('E') => self.open_window(false),
                     KeyCode::Char('l') => {
                         self.live_only = !self.live_only;
                         self.rebuild();
@@ -915,6 +949,7 @@ impl App {
                     KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('p') => self.toggle_pin(),
                     KeyCode::Char('x') => self.toggle_archive(),
+                    KeyCode::Char('E') => self.open_window(false),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
                     KeyCode::Char(' ') => self.mode = Mode::Space,
