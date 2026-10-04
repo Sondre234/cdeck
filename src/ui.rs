@@ -1042,26 +1042,47 @@ fn draw_help(f: &mut Frame) {
                 ("◐", "waiting on you (permission/input)"),
                 ("●", "idle (bold title: finished while away)"),
                 ("◆", "running in another terminal"),
+                ("×", "archived (listed only under :archived)"),
             ],
         ),
     ];
-    let mut lines = Vec::new();
-    for (name, items) in sections {
-        lines.push(Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().muted).bold())));
-        for (k, d) in *items {
-            lines.push(Line::from(vec![
-                Span::styled(format!("   {k:<15}"), Style::new().fg(th().accent)),
-                Span::styled(*d, Style::new().fg(Color::Reset)),
-            ]));
-        }
-        lines.push(Line::from(""));
-    }
+    let blocks: Vec<Vec<Line>> = sections
+        .iter()
+        .map(|(name, items)| {
+            let mut lines = vec![Line::from(Span::styled(format!(" {name}"), Style::new().fg(th().muted).bold()))];
+            for (k, d) in *items {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("   {k:<15}"), Style::new().fg(th().accent)),
+                    Span::styled(*d, Style::new().fg(Color::Reset)),
+                ]));
+            }
+            lines.push(Line::from(""));
+            lines
+        })
+        .collect();
     let a = f.area();
-    let w = 66.min(a.width);
-    let h = (lines.len() as u16 + 2).min(a.height);
+    let col_w: u16 = 64;
+    let total: usize = blocks.iter().map(Vec::len).sum();
+    // Too tall for the screen: flow the sections into two balanced columns.
+    let split = if total + 2 > a.height as usize && a.width >= col_w * 2 + 2 {
+        let len = |k: usize| blocks[..k].iter().map(Vec::len).sum::<usize>();
+        (0..=blocks.len()).min_by_key(|&k| len(k).max(total - len(k))).unwrap_or(blocks.len())
+    } else {
+        blocks.len()
+    };
+    let cols: Vec<Vec<Line>> =
+        [&blocks[..split], &blocks[split..]].into_iter().filter(|c| !c.is_empty()).map(|c| c.concat()).collect();
+    let w = (col_w * cols.len() as u16 + 2).min(a.width);
+    let h = (cols.iter().map(Vec::len).max().unwrap_or(0) as u16 + 2).min(a.height);
     let r = Rect::new((a.width - w) / 2, (a.height - h) / 2, w, h);
     f.render_widget(Clear, r);
-    f.render_widget(Paragraph::new(lines).block(panel("cdeck — any key closes")), r);
+    let block = panel("cdeck — any key closes");
+    let inner = block.inner(r);
+    f.render_widget(block, r);
+    for (i, lines) in cols.into_iter().enumerate() {
+        let x = col_w * i as u16;
+        f.render_widget(Paragraph::new(lines), Rect::new(inner.x + x, inner.y, col_w.min(inner.width.saturating_sub(x)), inner.height));
+    }
 }
 
 /// The full path shown after a directory chip, unless the chip already says it all (`~`).
