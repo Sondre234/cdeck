@@ -589,6 +589,12 @@ impl App {
         self.rebuild();
     }
 
+    /// Results land in the chat list, so that's where focus goes.
+    fn start_search(&mut self) {
+        self.mode = Mode::Search;
+        self.focus = Focus::Sidebar;
+    }
+
     /// Kick off a transcript search for the current filter, newest chats first.
     fn update_search(&mut self) {
         let mut files: Vec<_> = self.store.visible().map(|s| (s.mtime, s.id.clone(), s.file.clone())).collect();
@@ -718,7 +724,7 @@ impl App {
             Mode::Space => {
                 self.mode = Mode::Normal;
                 match k.code {
-                    KeyCode::Char('f') | KeyCode::Char('/') => self.mode = Mode::Search,
+                    KeyCode::Char('f') | KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char('n') => self.start_compose(self.selected_dir()),
                     KeyCode::Char('o') => self.new_in(self.selected_dir()),
                     KeyCode::Char('k') => self.kill_selected(),
@@ -802,7 +808,7 @@ impl App {
                         self.open_picker("");
                     }
                     KeyCode::Char('d') => self.kill_selected(),
-                    KeyCode::Char('/') => self.mode = Mode::Search,
+                    KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
                     KeyCode::Char(' ') => self.mode = Mode::Space,
                     KeyCode::Char('?') => self.toggle_keymap(),

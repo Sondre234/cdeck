@@ -28,10 +28,23 @@ pub fn dir_color(p: &Path) -> Color {
 /// modes never resizes the Claude instances.
 const KEYMAP_ROWS: u16 = 3;
 
+/// Below this many columns (e.g. a half-width tiled window) the chat list and
+/// the chat take turns filling the screen instead of sitting side by side.
+const NARROW: u16 = 100;
+
+pub fn is_narrow(area: Rect) -> bool {
+    area.width < NARROW
+}
+
 fn split_areas(area: Rect, keymap: bool) -> (Rect, Rect, Rect, Rect) {
     let map_h = if keymap { KEYMAP_ROWS + 1 } else { 0 };
     let [main, map, footer] =
         Layout::vertical([Constraint::Fill(1), Constraint::Length(map_h), Constraint::Length(1)]).areas(area);
+    // Both get the whole width; the pane keeps it even while hidden so
+    // switching views never resizes the Claude instances.
+    if is_narrow(area) {
+        return (main, main, map, footer);
+    }
     let side_w = (area.width / 4).clamp(30, 48).min(area.width.saturating_sub(20));
     let [side, pane] = Layout::horizontal([Constraint::Length(side_w), Constraint::Fill(1)]).areas(main);
     (side, pane, map, footer)
@@ -95,8 +108,20 @@ fn pad_to(spans: &mut Vec<Span<'static>>, width: usize, right: Vec<Span<'static>
 
 pub fn draw(f: &mut Frame, app: &mut App) {
     let (side, pane, map, footer) = split_areas(f.area(), app.keymap);
-    draw_sidebar(f, app, side);
-    draw_pane(f, app, pane);
+    let narrow = is_narrow(f.area());
+    // Narrow: the chat list while it has focus, otherwise the chat.
+    if !narrow || app.focus == Focus::Sidebar {
+        draw_sidebar(f, app, side);
+    } else {
+        app.hits.side = Rect::default();
+        app.hits.list = Rect::default();
+        app.hits.rows.clear();
+    }
+    if !narrow || app.focus == Focus::Pane {
+        draw_pane(f, app, pane);
+    } else {
+        app.hits.pane = Rect::default();
+    }
     draw_footer(f, app, footer);
     if app.keymap {
         // The strip shows prefix continuations itself, like emacs which-key.
@@ -162,7 +187,9 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
         (Focus::Pane, None) => Style::new().fg(th().accent),
         _ => Style::new().fg(th().border),
     };
-    let block = Block::new().borders(Borders::RIGHT).border_style(divider).style(Style::new().bg(Color::Reset).fg(Color::Reset));
+    // Nothing to divide from when the list fills a narrow screen.
+    let borders = if is_narrow(f.area()) { Borders::NONE } else { Borders::RIGHT };
+    let block = Block::new().borders(borders).border_style(divider).style(Style::new().bg(Color::Reset).fg(Color::Reset));
     let inner = block.inner(area);
     f.render_widget(block, area);
     let sig = if th().name.is_some() { 1 } else { 0 };
