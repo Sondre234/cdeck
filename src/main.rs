@@ -1523,6 +1523,7 @@ impl App {
         let at = ratatui::layout::Position::new(m.column, m.row);
         let in_side = self.hits.side.contains(at);
         let in_pane = self.hits.pane.contains(at);
+        let in_split = self.hits.split.contains(at);
         if self.help {
             if matches!(m.kind, MouseEventKind::Down(_)) {
                 self.help = false;
@@ -1535,24 +1536,26 @@ impl App {
                 self.leave_pane_modes();
                 self.move_by(if m.kind == MouseEventKind::ScrollDown { 1 } else { -1 });
             }
-            MouseEventKind::ScrollUp if in_pane => self.scroll(true, 3),
-            MouseEventKind::ScrollDown if in_pane => self.scroll(false, 3),
+            // Each half scrolls under the pointer, whichever has focus.
+            MouseEventKind::ScrollUp if in_pane || in_split => self.scroll_in(in_split, true, 3),
+            MouseEventKind::ScrollDown if in_pane || in_split => self.scroll_in(in_split, false, 3),
             MouseEventKind::Down(MouseButton::Left) if self.hits.list.contains(at) => {
                 let line = (m.row - self.hits.list.y) as usize;
                 let Some(Some(i)) = self.hits.rows.get(line).copied() else { return };
                 self.leave_pane_modes();
                 self.click_row(i);
             }
-            MouseEventKind::Down(MouseButton::Left) if in_pane => {
-                if !matches!(self.mode, Mode::Normal | Mode::Insert | Mode::Compose) {
+            MouseEventKind::Down(MouseButton::Left) if in_pane || in_split => {
+                // Already typing into this half (or composing): nothing to do.
+                let here = self.focus == Focus::Pane && self.on_right() == in_split;
+                if !matches!(self.mode, Mode::Normal | Mode::Insert) || (self.mode == Mode::Insert && here) {
                     return;
                 }
-                if self.mode == Mode::Normal {
-                    // Clicking into a chat is like pressing Enter on it.
-                    match self.selected.as_deref() {
-                        Some(id) if id == NEW_CHAT || self.live(id).is_some() => self.open(false),
-                        _ => self.focus = Focus::Pane,
-                    }
+                self.mode = Mode::Normal;
+                self.focus_pane(in_split);
+                // Clicking into a chat is like pressing Enter on it.
+                if self.pane_id().is_some_and(|id| id == NEW_CHAT || self.live(id).is_some()) {
+                    self.open(false);
                 }
             }
             _ => {}

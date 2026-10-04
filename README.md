@@ -162,7 +162,8 @@ When split, these act on whichever half has focus.
 |--------|--------|
 | wheel on list | next / previous chat |
 | click | select; click the selected chat again to open it |
-| wheel on pane | scroll |
+| click on pane | focus it (that half, when split); a live chat starts typing |
+| wheel on pane | scroll (each half of a split scrolls on its own) |
 | `Shift`-drag | select text natively (most terminals), or turn capture off with `M` |
 
 ## Search

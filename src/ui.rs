@@ -1103,7 +1103,8 @@ fn draw_help(f: &mut Frame) {
             &[
                 ("wheel on list", "next / previous chat"),
                 ("click", "select · click again to open"),
-                ("wheel on pane", "scroll the pane"),
+                ("wheel on pane", "scroll the pane (or that half)"),
+                ("click on pane", "focus it; type if it's live"),
                 ("Shift-drag", "select text natively (most terminals)"),
             ],
         ),
