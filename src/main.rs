@@ -120,6 +120,11 @@ pub struct App {
     phase: HashMap<String, (Phase, bool, Instant)>,
     /// Desktop notifications when a chat finishes or needs you; `:notify` toggles.
     pub notify: bool,
+    /// Ring the terminal bell alongside notifications, so the WM marks the
+    /// window urgent; `:bell` toggles, independently of `:notify`.
+    pub bell: bool,
+    /// A bell is due; written between frames by the main loop.
+    ring: bool,
     /// Mouse capture; off hands the mouse back to the terminal for native selection.
     pub mouse: bool,
     confirm_window: Option<String>,
@@ -171,6 +176,8 @@ impl App {
             confirm_resume: None,
             phase: HashMap::new(),
             notify: !state_file("notify-off").exists(),
+            bell: !state_file("bell-off").exists(),
+            ring: false,
             mouse: !state_file("mouse-off").exists(),
             confirm_window: None,
             answered: None,
@@ -805,6 +812,7 @@ impl App {
                 self.rebuild();
             }
             "notify" => self.toggle_notify(),
+            "bell" => self.toggle_bell(),
             "mouse" => self.toggle_mouse(),
             "h" | "help" => self.help = true,
             _ => self.error(&format!("unknown command: {cmd}")),
@@ -1171,12 +1179,15 @@ impl App {
             // fallback flickers (redraws, resizes) and would spam.
             let watching = selected && self.focus == Focus::Pane;
             let was = was.filter(|w| w.1 && trusted).map(|w| w.0);
-            if let Some(what) = noteworthy(was, now).filter(|_| self.notify && !watching) {
-                let what = match what {
-                    Phase::Waiting => format!("needs you: {}", waiting_for.unwrap_or_default()),
-                    _ => "finished".into(),
-                };
-                self.notify_send(&id, &what);
+            if let Some(what) = noteworthy(was, now).filter(|_| !watching) {
+                self.ring |= self.bell;
+                if self.notify {
+                    let what = match what {
+                        Phase::Waiting => format!("needs you: {}", waiting_for.unwrap_or_default()),
+                        _ => "finished".into(),
+                    };
+                    self.notify_send(&id, &what);
+                }
             }
         }
         self.phase.retain(|id, _| self.lives.iter().any(|l| &l.id == id));
@@ -1211,6 +1222,12 @@ impl App {
             let _ = execute!(out, event::DisableMouseCapture);
             self.info("mouse off — select text natively, M turns it back on");
         }
+    }
+
+    fn toggle_bell(&mut self) {
+        self.bell = !self.bell;
+        set_flag("bell-off", !self.bell);
+        self.info(if self.bell { "bell on · :bell turns it off" } else { "bell off · :bell turns it back on" });
     }
 
     fn toggle_notify(&mut self) {
@@ -1329,10 +1346,13 @@ fn main() -> std::io::Result<()> {
         }
         // Between frames, so nothing interleaves with ratatui's output.
         let clip = live::take_clipboard();
-        if !clip.is_empty() {
+        if !clip.is_empty() || app.ring {
             use std::io::Write;
             for c in clip {
                 let _ = out.write_all(&c);
+            }
+            if std::mem::take(&mut app.ring) {
+                let _ = out.write_all(b"\x07");
             }
             let _ = out.flush();
         }

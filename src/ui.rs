@@ -975,6 +975,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     if !app.mouse {
         right = format!("mouse off · {right}");
     }
+    if !app.bell {
+        right = format!("no bell · {right}");
+    }
     if !app.notify {
         right = format!("quiet · {right}");
     }
@@ -1077,6 +1080,7 @@ fn draw_help(f: &mut Frame) {
                 (":win  :win!", "own terminal window (! even if running)"),
                 (":resume!", "resume even if running elsewhere"),
                 (":notify", "desktop notifications on / off"),
+                (":bell", "terminal bell (window urgency) on / off"),
                 (":mouse", "mouse capture off / on, like M"),
                 (":q  :q!", "quit / quit killing instances"),
             ],

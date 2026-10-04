@@ -182,6 +182,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:win` / `:win!` | open in its own terminal window (`!`: even if it's running) |
 | `:live` | toggle live-only view |
 | `:notify` | desktop notifications on / off |
+| `:bell` | terminal bell on / off (marks the window urgent) |
 | `:mouse` | mouse capture on / off |
 | `:refresh` / `:r` | rescan transcripts |
 | `:help` / `:h` | full help |
@@ -230,6 +231,12 @@ notification with `notify-send` (works with mako, dunst, swaync, …). A chat
 counts as watched when it's selected and the pane has focus. `:notify` toggles
 them; the footer shows `quiet` while they're off.
 
+At the same moments cdeck also rings the terminal bell, which most terminals
+turn into a window urgency hint: kitty marks the window urgent, and Hyprland
+(or sway, i3, …) highlights its workspace. `:bell` toggles it independently of
+`:notify`, so you can have either, both or neither; the footer shows `no bell`
+while it's off.
+
 ## Own terminal window (`E`)
 
 Opens `claude --resume <id>` in the chat's directory in a new terminal window.
@@ -241,7 +248,7 @@ Uses `$TERMINAL` if set, otherwise the first of `kitty`, `foot`, `alacritty`,
 | Path / variable | Purpose |
 |-----------------|---------|
 | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | where transcripts and session status are read from — never written |
-| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
+| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `bell-off`, `mouse-off` |
 | `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed-title cache so startup doesn't reread every transcript; safe to delete |
 | `$TERMINAL` | terminal used by `E` / `:win` |
 | `$CDECK_CLAUDE` | program to run instead of `claude` (testing) |
