@@ -113,8 +113,9 @@ pub struct App {
     /// Ctrl-L: throw away what's on screen and draw everything again.
     pub repaint: bool,
     confirm_resume: Option<String>,
-    /// Last seen phase of each live chat, and whether Claude's status file said so.
-    phase: HashMap<String, (Phase, bool)>,
+    /// Last seen phase of each live chat, whether Claude's status file said
+    /// so, and since when (so `u` can go to whoever has waited longest).
+    phase: HashMap<String, (Phase, bool, Instant)>,
     /// Desktop notifications when a chat finishes or needs you; `:notify` toggles.
     pub notify: bool,
     /// Mouse capture; off hands the mouse back to the terminal for native selection.
@@ -487,6 +488,27 @@ impl App {
             (None, _) => 0,
         };
         self.select(Some(ids[next].clone()));
+    }
+
+    /// u: the next chat that needs you, cycling on repeated presses.
+    fn jump_attention(&mut self) {
+        let cands = self
+            .item_ids()
+            .enumerate()
+            .filter_map(|(pos, id)| {
+                let rank = match self.status(id) {
+                    Status::Waiting(_) => 0,
+                    Status::Idle { unseen: true } => 1,
+                    _ => return None,
+                };
+                let since = self.phase.get(id).map_or_else(Instant::now, |p| p.2);
+                Some((rank, since, pos, id.to_string()))
+            })
+            .collect();
+        match next_attention(cands, self.selected.as_deref()) {
+            Some(id) => self.select(Some(id)),
+            None => self.info("nothing needs you"),
+        }
     }
 
     fn info(&mut self, s: &str) {
@@ -933,6 +955,7 @@ impl App {
                         self.rebuild();
                     }
                     KeyCode::Char('r') => self.refresh(),
+                    KeyCode::Char('u') => self.jump_attention(),
                     KeyCode::Char('q') => {
                         self.cmdline = "q".into();
                         self.run_command();
@@ -1021,6 +1044,7 @@ impl App {
                     KeyCode::Char('?') => self.toggle_keymap(),
                     KeyCode::Char('r') => self.refresh(),
                     KeyCode::Char('z') => self.toggle_group(),
+                    KeyCode::Char('u') => self.jump_attention(),
                     KeyCode::Char('M') => self.toggle_mouse(),
                     KeyCode::Tab => self.cycle_live(true),
                     KeyCode::BackTab => self.cycle_live(false),
@@ -1082,7 +1106,11 @@ impl App {
                 _ => (Phase::Idle, None),
             };
             let trusted = self.running.contains_key(&id);
-            let was = self.phase.insert(id.clone(), (now, trusted));
+            let since = match self.phase.get(&id) {
+                Some(p) if p.0 == now => p.2,
+                _ => Instant::now(),
+            };
+            let was = self.phase.insert(id.clone(), (now, trusted, since));
             let selected = sel.as_deref() == Some(id.as_str());
             if was.is_some_and(|w| w.0 == Phase::Busy) && now != Phase::Busy && !selected {
                 if let Some(l) = self.live_mut(&id) {
@@ -1148,6 +1176,14 @@ enum Phase {
     Idle,
     Busy,
     Waiting,
+}
+
+/// Waiting chats before ones that finished unseen, each longest-waiting first
+/// (then list order); the one after the current selection, wrapping around.
+fn next_attention(mut cands: Vec<(u8, Instant, usize, String)>, cur: Option<&str>) -> Option<String> {
+    cands.sort();
+    let next = cands.iter().position(|c| Some(c.3.as_str()) == cur).map_or(0, |p| (p + 1) % cands.len());
+    cands.into_iter().nth(next).map(|c| c.3)
 }
 
 /// Which phase changes deserve a desktop notification: finishing a turn, and
@@ -1435,6 +1471,25 @@ mod tests {
         assert_eq!(noteworthy(Some(Waiting), Busy), None);
         assert_eq!(noteworthy(Some(Waiting), Idle), None);
         assert_eq!(noteworthy(Some(Idle), Busy), None);
+    }
+
+    #[test]
+    fn attention_goes_waiting_first_then_oldest_and_cycles() {
+        let t = Instant::now();
+        let later = t + Duration::from_secs(5);
+        let c = || {
+            vec![
+                (1, t, 0, "unseen".to_string()),
+                (0, later, 1, "new-wait".to_string()),
+                (0, t, 2, "old-wait".to_string()),
+            ]
+        };
+        assert_eq!(next_attention(c(), None).as_deref(), Some("old-wait"));
+        assert_eq!(next_attention(c(), Some("old-wait")).as_deref(), Some("new-wait"));
+        assert_eq!(next_attention(c(), Some("new-wait")).as_deref(), Some("unseen"));
+        assert_eq!(next_attention(c(), Some("unseen")).as_deref(), Some("old-wait"));
+        assert_eq!(next_attention(c(), Some("elsewhere")).as_deref(), Some("old-wait"));
+        assert_eq!(next_attention(vec![], None), None);
     }
 
     #[test]

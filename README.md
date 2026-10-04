@@ -65,6 +65,7 @@ The footer badge shows the current mode.
 | `E` | open in its own terminal window |
 | `z` | expand / fold a directory |
 | `Tab` `Shift-Tab` | cycle through live chats |
+| `u` | jump to the chat that needs you (see below) |
 | `/` | search (see below) |
 | `Esc` | clear the search filter |
 | `r` | rescan transcripts |
@@ -92,6 +93,7 @@ The footer badge shows the current mode.
 | `Home` `End` | top / bottom |
 | `n` `N` | next / previous search match (when the chat matched a search) |
 | `Enter` | start typing into Claude |
+| `u` | jump to the chat that needs you |
 | `←` `Esc` | back to the chat list |
 
 ### Typing into Claude
@@ -129,6 +131,7 @@ The footer badge shows the current mode.
 | `E` | open in a new terminal window |
 | `l` | toggle live-only view |
 | `r` | rescan |
+| `u` | go to the chat that needs you |
 | `?` | full help |
 | `q` | quit |
 
@@ -192,6 +195,12 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `◆` | running in another terminal |
 | `★` | pinned section |
 | `×` | archived (only listed under `:archived`) |
+
+`u` (from the list or the pane) selects the next chat that needs you: first
+the ones waiting (`◐`), longest-waiting first, then the ones that finished
+while you weren't looking (bold), oldest first. Pressing it again moves on to
+the next one, wrapping around. Only chats shown in the list count, so a search
+filter can hide them.
 
 ## Notifications
 
