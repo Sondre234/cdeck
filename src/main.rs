@@ -1321,7 +1321,10 @@ fn main() -> std::io::Result<()> {
         if app.narrow && app.split.is_some() {
             app.unsplit();
         }
-        let pane = ui::pane_size(size.into(), app.keymap, false);
+        // Split or not, every live chat gets the size it would be drawn at:
+        // both halves are equally wide, so moving the selection never resizes
+        // anything; only splitting, unsplitting and the window itself do.
+        let pane = ui::pane_size(size.into(), app.keymap, app.split.is_some());
         app.pane = pane;
         for l in &mut app.lives {
             l.resize(pane);

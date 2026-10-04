@@ -95,7 +95,9 @@ search) and is stored in cdeck's own state; `~/.claude` is never written.
 stays in the right half, and the left half keeps following the selection, so you
 can watch one chat while browsing or typing in others. `Ctrl-w v` again moves
 the right half to the current selection. Narrow windows (below `narrow_width`)
-never split; shrinking one closes the split.
+never split; shrinking one closes the split. While split, every live session is
+sized to half the pane (both halves are the same width), and back to the full
+pane when the split closes.
 
 ### Pane focused (transcript preview or live session, not typing)
 
