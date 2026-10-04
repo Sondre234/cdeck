@@ -39,6 +39,8 @@ pub enum Focus {
 }
 
 const GROUP_LIMIT: usize = 5;
+/// Claude's `waitingFor` while a tool permission dialog is up (otherwise "input needed").
+const PERMISSION: &str = "permission prompt";
 /// Pseudo session id for the "+ New chat" row.
 pub const NEW_CHAT: &str = "+new";
 
@@ -121,6 +123,9 @@ pub struct App {
     /// Mouse capture; off hands the mouse back to the terminal for native selection.
     pub mouse: bool,
     confirm_window: Option<String>,
+    /// Last permission dialog answered from the list, so a double press can't
+    /// land in whatever Claude draws next.
+    answered: Option<(String, Instant)>,
     quit: bool,
 }
 
@@ -168,6 +173,7 @@ impl App {
             notify: !state_file("notify-off").exists(),
             mouse: !state_file("mouse-off").exists(),
             confirm_window: None,
+            answered: None,
             quit: false,
         };
         app.rebuild();
@@ -509,6 +515,47 @@ impl App {
             Some(id) => self.select(Some(id)),
             None => self.info("nothing needs you"),
         }
+    }
+
+    /// What the selected chat is waiting on, for the footer.
+    pub fn waiting_hint(&self) -> Option<String> {
+        let id = self.selected.as_deref()?;
+        match self.status(id) {
+            Status::Waiting(Some(PERMISSION)) => Some(match self.live(id).and_then(Live::prompt) {
+                Some(p) if p.summary.is_empty() => "◐ needs permission · A allow · D deny".into(),
+                Some(p) => format!("◐ needs permission: {} · A allow · D deny", p.summary),
+                None => "◐ needs permission · ⏎ open it to answer".into(),
+            }),
+            Status::Waiting(w) => Some(format!("◐ needs you: {} · ⏎ open it to answer", w.unwrap_or("input"))),
+            Status::External { status: "waiting", .. } => Some("◆ waiting on you in another terminal".into()),
+            _ => None,
+        }
+    }
+
+    /// A / D: answer the selected chat's permission dialog without opening it.
+    /// Keys only go out while the dialog is on screen: Enter when plain "Yes"
+    /// is highlighted (allow once), Esc to deny.
+    fn answer_permission(&mut self, allow: bool) {
+        let Some(id) = self.selected.clone() else { return };
+        if let Status::External { .. } = self.status(&id) {
+            return self.error("running elsewhere — answer it in its own terminal");
+        }
+        let Some(l) = self.live(&id) else { return self.error("not running in cdeck") };
+        if !matches!(self.status(&id), Status::Waiting(Some(PERMISSION))) {
+            return self.error("no permission prompt waiting");
+        }
+        if self.answered.as_ref().is_some_and(|(a, t)| *a == id && t.elapsed() < Duration::from_millis(1500)) {
+            return self.error("just answered — give claude a moment");
+        }
+        let keys: &[u8] = match (l.prompt(), allow) {
+            (None, _) => return self.error("no permission dialog on screen — ⏎ opens the chat"),
+            (Some(p), true) if !p.yes_focused => return self.error("\"Yes\" isn't highlighted — ⏎ opens the chat to answer"),
+            (Some(_), true) => b"\r",
+            (Some(_), false) => b"\x1b",
+        };
+        l.write(keys);
+        self.answered = Some((id, Instant::now()));
+        self.info(if allow { "allowed once" } else { "denied" });
     }
 
     fn info(&mut self, s: &str) {
@@ -1045,6 +1092,8 @@ impl App {
                     KeyCode::Char('r') => self.refresh(),
                     KeyCode::Char('z') => self.toggle_group(),
                     KeyCode::Char('u') => self.jump_attention(),
+                    KeyCode::Char('A') => self.answer_permission(true),
+                    KeyCode::Char('D') => self.answer_permission(false),
                     KeyCode::Char('M') => self.toggle_mouse(),
                     KeyCode::Tab => self.cycle_live(true),
                     KeyCode::BackTab => self.cycle_live(false),

@@ -66,6 +66,7 @@ The footer badge shows the current mode.
 | `z` | expand / fold a directory |
 | `Tab` `Shift-Tab` | cycle through live chats |
 | `u` | jump to the chat that needs you (see below) |
+| `A` / `D` | allow / deny the selected chat's permission prompt without opening it |
 | `/` | search (see below) |
 | `Esc` | clear the search filter |
 | `r` | rescan transcripts |
@@ -94,6 +95,7 @@ The footer badge shows the current mode.
 | `n` `N` | next / previous search match (when the chat matched a search) |
 | `Enter` | start typing into Claude |
 | `u` | jump to the chat that needs you |
+| `A` / `D` | allow / deny its permission prompt |
 | `←` `Esc` | back to the chat list |
 
 ### Typing into Claude
@@ -201,6 +203,24 @@ the ones waiting (`◐`), longest-waiting first, then the ones that finished
 while you weren't looking (bold), oldest first. Pressing it again moves on to
 the next one, wrapping around. Only chats shown in the list count, so a search
 filter can hide them.
+
+## Permission prompts
+
+When the selected chat is waiting on a tool permission prompt, the footer says
+what it wants (`◐ needs permission: Bash command · rm -rf target · … · A allow
+· D deny`), and you can answer without opening the chat:
+
+- `A` allows it once: cdeck presses `Enter`, but only while Claude's dialog is
+  on screen with plain "Yes" highlighted, never "Yes, and don't ask again".
+- `D` denies it: cdeck presses `Esc`, Claude's own "No" key.
+
+Before sending anything cdeck checks that Claude's status file says it's
+waiting on a permission prompt and that the dialog is actually drawn in the
+pane; otherwise it tells you to open the chat (`Enter`) and answer there.
+A second press within a moment of the first is refused, so it can't land in
+whatever Claude shows next. Chats running in another terminal (`◆`) are never
+touched. Questions Claude asks you (`needs you: input needed`) still need
+opening.
 
 ## Notifications
 
