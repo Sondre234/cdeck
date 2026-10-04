@@ -367,3 +367,53 @@ pub fn age(t: Option<SystemTime>) -> String {
         _ => format!("{}w", s / 604_800),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn snippet_centres_on_match_case_insensitively() {
+        let text = format!("{} Needle here {}", "a ".repeat(40), "b ".repeat(60));
+        let s = snippet(&text, "needle").unwrap();
+        assert!(s.starts_with('…') && s.ends_with('…'));
+        assert!(s.contains("Needle here"));
+        assert_eq!(snippet("nothing", "needle"), None);
+    }
+
+    #[test]
+    fn finds_user_and_assistant_text_but_not_tool_output() {
+        let dir = std::env::temp_dir().join(format!("cdeck-test-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("t.jsonl");
+        fs::write(
+            &file,
+            concat!(
+                r#"{"type":"user","message":{"content":[{"type":"tool_result","content":"secret ToolWord"}]}}"#,
+                "\n",
+                r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Fixed the Borrow checker error"}]}}"#,
+                "\n",
+                r#"{"type":"user","message":{"content":"café \"quoted\" thing"}}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let find = |q: &str| find_in_transcript(&file, q, || false);
+        assert_eq!(find("borrow checker").as_deref(), Some("Fixed the Borrow checker error"));
+        assert_eq!(find("toolword"), None);
+        assert!(find("café").is_some());
+        assert!(find("\"quoted\"").is_some());
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// `cargo test -- --ignored --nocapture` to time a search over real history.
+    #[test]
+    #[ignore]
+    fn time_real_history() {
+        let mut store = Store::default();
+        store.scan();
+        let t = std::time::Instant::now();
+        let hits = store.visible().filter(|s| find_in_transcript(&s.file, "error", || false).is_some()).count();
+        println!("{hits}/{} chats in {:?}", store.visible().count(), t.elapsed());
+    }
+}
