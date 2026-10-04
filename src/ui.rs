@@ -156,6 +156,7 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ("E", "open in a new terminal window"),
                 ("l", "toggle live-only"),
                 ("r", "rescan"),
+                ("u", "go to the chat that needs you"),
                 ("?", "help"),
                 ("q", "quit"),
             ],
@@ -970,6 +971,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let hint = Style::new().fg(th().faint);
     let mut spans = vec![Span::styled(format!(" {badge} "), Style::new().bg(color).fg(th().inverse).bold()), Span::raw(" ")];
     let mut cursor = None;
+    let waiting = if app.mode == Mode::Normal { app.waiting_hint() } else { None };
     match app.mode {
         Mode::Command => {
             spans.push(Span::styled(format!(":{}", app.cmdline), Style::new().fg(Color::Reset)));
@@ -985,6 +987,8 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
         _ => match &app.msg {
             Some((m, true)) => spans.push(Span::styled(m.clone(), Style::new().fg(th().error))),
             Some((m, false)) => spans.push(Span::styled(m.clone(), Style::new().fg(th().muted))),
+            // Whatever the selected chat is waiting on beats the generic hint.
+            None if waiting.is_some() => spans.push(Span::styled(waiting.unwrap_or_default(), Style::new().fg(th().warning))),
             None if app.keymap => {}
             None => spans.push(Span::styled(
                 match (app.mode, app.focus) {
@@ -1016,6 +1020,9 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     }
     if !app.mouse {
         right = format!("mouse off · {right}");
+    }
+    if !app.bell {
+        right = format!("no bell · {right}");
     }
     if !app.notify {
         right = format!("quiet · {right}");
@@ -1078,6 +1085,8 @@ fn draw_help(f: &mut Frame) {
                 ("M", "mouse capture off / on, for native selection"),
                 ("Ctrl-l", "redraw the screen if it looks broken"),
                 ("Tab S-Tab", "cycle live chats"),
+                ("u", "next chat that needs you (◐, then bold)"),
+                ("A D", "allow / deny its permission prompt, unopened"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
                 ("/", "search titles, dirs and chat text"),
@@ -1119,6 +1128,7 @@ fn draw_help(f: &mut Frame) {
                 (":win  :win!", "own terminal window (! even if running)"),
                 (":resume!", "resume even if running elsewhere"),
                 (":notify", "desktop notifications on / off"),
+                (":bell", "terminal bell (window urgency) on / off"),
                 (":mouse", "mouse capture off / on, like M"),
                 (":tools", "tool output in previews on / off, like t"),
                 (":copy [all]", "copy last reply / whole chat, like y Y"),
@@ -1266,6 +1276,7 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("E", "own window"),
                 ("l", "live-only"),
                 ("r", "rescan"),
+                ("u", "needs you"),
                 ("?", "full help"),
                 ("q", "quit"),
             ],
@@ -1302,6 +1313,8 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("⏎", "type into claude"),
                 ("← Esc", "back to list"),
                 ("Tab", "next live chat"),
+                ("u", "needs you"),
+                ("A D", "allow / deny"),
                 ("n", "new chat"),
                 ("d", "kill"),
                 ("space", "menu…"),

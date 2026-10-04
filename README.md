@@ -76,6 +76,8 @@ The footer badge shows the current mode.
 | `Y` | copy the whole chat as Markdown (`## You` / `## Claude`, tool calls as `> ⚙ …`) |
 | `z` | expand / fold a directory |
 | `Tab` `Shift-Tab` | cycle through live chats |
+| `u` | jump to the chat that needs you (see below) |
+| `A` / `D` | allow / deny the selected chat's permission prompt without opening it |
 | `/` | search (see below) |
 | `Esc` | clear the search filter |
 | `r` | rescan transcripts |
@@ -105,6 +107,8 @@ The footer badge shows the current mode.
 | `y` `Y` | copy Claude's last reply / the whole chat as Markdown |
 | `t` | show / hide tool output in transcript previews (first 6 lines of each result, under its call) |
 | `Enter` | start typing into Claude |
+| `u` | jump to the chat that needs you |
+| `A` / `D` | allow / deny its permission prompt |
 | `←` `Esc` | back to the chat list |
 
 ### Typing into Claude
@@ -142,6 +146,7 @@ The footer badge shows the current mode.
 | `E` | open in a new terminal window |
 | `l` | toggle live-only view |
 | `r` | rescan |
+| `u` | go to the chat that needs you |
 | `?` | full help |
 | `q` | quit |
 
@@ -190,6 +195,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:win` / `:win!` | open in its own terminal window (`!`: even if it's running) |
 | `:live` | toggle live-only view |
 | `:notify` | desktop notifications on / off |
+| `:bell` | terminal bell on / off (marks the window urgent) |
 | `:mouse` | mouse capture on / off |
 | `:tools` | tool output in transcript previews on / off, like `t` |
 | `:copy` / `:copy all` | copy Claude's last reply / the whole chat, like `y` / `Y` |
@@ -208,6 +214,30 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `★` | pinned section |
 | `×` | archived (only listed under `:archived`) |
 
+`u` (from the list or the pane) selects the next chat that needs you: first
+the ones waiting (`◐`), longest-waiting first, then the ones that finished
+while you weren't looking (bold), oldest first. Pressing it again moves on to
+the next one, wrapping around. Only chats shown in the list count, so a search
+filter can hide them.
+
+## Permission prompts
+
+When the selected chat is waiting on a tool permission prompt, the footer says
+what it wants (`◐ needs permission: Bash command · rm -rf target · … · A allow
+· D deny`), and you can answer without opening the chat:
+
+- `A` allows it once: cdeck presses `Enter`, but only while Claude's dialog is
+  on screen with plain "Yes" highlighted, never "Yes, and don't ask again".
+- `D` denies it: cdeck presses `Esc`, Claude's own "No" key.
+
+Before sending anything cdeck checks that Claude's status file says it's
+waiting on a permission prompt and that the dialog is actually drawn in the
+pane; otherwise it tells you to open the chat (`Enter`) and answer there.
+A second press within a moment of the first is refused, so it can't land in
+whatever Claude shows next. Chats running in another terminal (`◆`) are never
+touched. Questions Claude asks you (`needs you: input needed`) still need
+opening.
+
 ## Notifications
 
 When a chat running inside cdeck finishes a turn or starts waiting for
@@ -215,6 +245,12 @@ permission/input while you aren't watching it, cdeck sends a desktop
 notification with `notify-send` (works with mako, dunst, swaync, …). A chat
 counts as watched when it's selected and the pane has focus. `:notify` toggles
 them; the footer shows `quiet` while they're off.
+
+At the same moments cdeck also rings the terminal bell, which most terminals
+turn into a window urgency hint: kitty marks the window urgent, and Hyprland
+(or sway, i3, …) highlights its workspace. `:bell` toggles it independently of
+`:notify`, so you can have either, both or neither; the footer shows `no bell`
+while it's off.
 
 ## Own terminal window (`E`)
 
@@ -227,7 +263,7 @@ Uses `$TERMINAL` if set, otherwise the first of `kitty`, `foot`, `alacritty`,
 | Path / variable | Purpose |
 |-----------------|---------|
 | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | where transcripts and session status are read from — never written |
-| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
+| `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `bell-off`, `mouse-off` |
 | `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed titles and token usage, so startup doesn't reread every transcript; safe to delete |
 | `$TERMINAL` | terminal used by `E` / `:win` |
 | `$CDECK_CLAUDE` | program to run instead of `claude` (testing) |

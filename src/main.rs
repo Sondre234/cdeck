@@ -40,6 +40,8 @@ pub enum Focus {
 }
 
 const GROUP_LIMIT: usize = 5;
+/// Claude's `waitingFor` while a tool permission dialog is up (otherwise "input needed").
+const PERMISSION: &str = "permission prompt";
 /// Pseudo session id for the "+ New chat" row.
 pub const NEW_CHAT: &str = "+new";
 
@@ -119,13 +121,22 @@ pub struct App {
     /// Ctrl-L: throw away what's on screen and draw everything again.
     pub repaint: bool,
     confirm_resume: Option<String>,
-    /// Last seen phase of each live chat, and whether Claude's status file said so.
-    phase: HashMap<String, (Phase, bool)>,
+    /// Last seen phase of each live chat, whether Claude's status file said
+    /// so, and since when (so `u` can go to whoever has waited longest).
+    phase: HashMap<String, (Phase, bool, Instant)>,
     /// Desktop notifications when a chat finishes or needs you; `:notify` toggles.
     pub notify: bool,
+    /// Ring the terminal bell alongside notifications, so the WM marks the
+    /// window urgent; `:bell` toggles, independently of `:notify`.
+    pub bell: bool,
+    /// A bell is due; written between frames by the main loop.
+    ring: bool,
     /// Mouse capture; off hands the mouse back to the terminal for native selection.
     pub mouse: bool,
     confirm_window: Option<String>,
+    /// Last permission dialog answered from the list, so a double press can't
+    /// land in whatever Claude draws next.
+    answered: Option<(String, Instant)>,
     quit: bool,
 }
 
@@ -173,8 +184,11 @@ impl App {
             confirm_resume: None,
             phase: HashMap::new(),
             notify: !state_file("notify-off").exists(),
+            bell: !state_file("bell-off").exists(),
+            ring: false,
             mouse: !state_file("mouse-off").exists(),
             confirm_window: None,
+            answered: None,
             quit: false,
         };
         app.rebuild();
@@ -497,6 +511,68 @@ impl App {
         self.select(Some(ids[next].clone()));
     }
 
+    /// u: the next chat that needs you, cycling on repeated presses.
+    fn jump_attention(&mut self) {
+        let cands = self
+            .item_ids()
+            .enumerate()
+            .filter_map(|(pos, id)| {
+                let rank = match self.status(id) {
+                    Status::Waiting(_) => 0,
+                    Status::Idle { unseen: true } => 1,
+                    _ => return None,
+                };
+                let since = self.phase.get(id).map_or_else(Instant::now, |p| p.2);
+                Some((rank, since, pos, id.to_string()))
+            })
+            .collect();
+        match next_attention(cands, self.selected.as_deref()) {
+            Some(id) => self.select(Some(id)),
+            None => self.info("nothing needs you"),
+        }
+    }
+
+    /// What the selected chat is waiting on, for the footer.
+    pub fn waiting_hint(&self) -> Option<String> {
+        let id = self.selected.as_deref()?;
+        match self.status(id) {
+            Status::Waiting(Some(PERMISSION)) => Some(match self.live(id).and_then(Live::prompt) {
+                Some(p) if p.summary.is_empty() => "◐ needs permission · A allow · D deny".into(),
+                Some(p) => format!("◐ needs permission: {} · A allow · D deny", p.summary),
+                None => "◐ needs permission · ⏎ open it to answer".into(),
+            }),
+            Status::Waiting(w) => Some(format!("◐ needs you: {} · ⏎ open it to answer", w.unwrap_or("input"))),
+            Status::External { status: "waiting", .. } => Some("◆ waiting on you in another terminal".into()),
+            _ => None,
+        }
+    }
+
+    /// A / D: answer the selected chat's permission dialog without opening it.
+    /// Keys only go out while the dialog is on screen: Enter when plain "Yes"
+    /// is highlighted (allow once), Esc to deny.
+    fn answer_permission(&mut self, allow: bool) {
+        let Some(id) = self.selected.clone() else { return };
+        if let Status::External { .. } = self.status(&id) {
+            return self.error("running elsewhere — answer it in its own terminal");
+        }
+        let Some(l) = self.live(&id) else { return self.error("not running in cdeck") };
+        if !matches!(self.status(&id), Status::Waiting(Some(PERMISSION))) {
+            return self.error("no permission prompt waiting");
+        }
+        if self.answered.as_ref().is_some_and(|(a, t)| *a == id && t.elapsed() < Duration::from_millis(1500)) {
+            return self.error("just answered — give claude a moment");
+        }
+        let keys: &[u8] = match (l.prompt(), allow) {
+            (None, _) => return self.error("no permission dialog on screen — ⏎ opens the chat"),
+            (Some(p), true) if !p.yes_focused => return self.error("\"Yes\" isn't highlighted — ⏎ opens the chat to answer"),
+            (Some(_), true) => b"\r",
+            (Some(_), false) => b"\x1b",
+        };
+        l.write(keys);
+        self.answered = Some((id, Instant::now()));
+        self.info(if allow { "allowed once" } else { "denied" });
+    }
+
     fn info(&mut self, s: &str) {
         self.msg = Some((s.into(), false));
     }
@@ -773,6 +849,7 @@ impl App {
                 self.rebuild();
             }
             "notify" => self.toggle_notify(),
+            "bell" => self.toggle_bell(),
             "mouse" => self.toggle_mouse(),
             "tools" => self.toggle_tools(),
             "copy" if arg.is_empty() => self.copy_selected(false),
@@ -974,6 +1051,7 @@ impl App {
                         self.rebuild();
                     }
                     KeyCode::Char('r') => self.refresh(),
+                    KeyCode::Char('u') => self.jump_attention(),
                     KeyCode::Char('q') => {
                         self.cmdline = "q".into();
                         self.run_command();
@@ -1063,6 +1141,9 @@ impl App {
                     KeyCode::Char('?') => self.toggle_keymap(),
                     KeyCode::Char('r') => self.refresh(),
                     KeyCode::Char('z') => self.toggle_group(),
+                    KeyCode::Char('u') => self.jump_attention(),
+                    KeyCode::Char('A') => self.answer_permission(true),
+                    KeyCode::Char('D') => self.answer_permission(false),
                     KeyCode::Char('M') => self.toggle_mouse(),
                     KeyCode::Char('y') => self.copy_selected(false),
                     KeyCode::Char('Y') => self.copy_selected(true),
@@ -1126,7 +1207,11 @@ impl App {
                 _ => (Phase::Idle, None),
             };
             let trusted = self.running.contains_key(&id);
-            let was = self.phase.insert(id.clone(), (now, trusted));
+            let since = match self.phase.get(&id) {
+                Some(p) if p.0 == now => p.2,
+                _ => Instant::now(),
+            };
+            let was = self.phase.insert(id.clone(), (now, trusted, since));
             let selected = sel.as_deref() == Some(id.as_str());
             if was.is_some_and(|w| w.0 == Phase::Busy) && now != Phase::Busy && !selected {
                 if let Some(l) = self.live_mut(&id) {
@@ -1138,12 +1223,15 @@ impl App {
             // fallback flickers (redraws, resizes) and would spam.
             let watching = selected && self.focus == Focus::Pane;
             let was = was.filter(|w| w.1 && trusted).map(|w| w.0);
-            if let Some(what) = noteworthy(was, now).filter(|_| self.notify && !watching) {
-                let what = match what {
-                    Phase::Waiting => format!("needs you: {}", waiting_for.unwrap_or_default()),
-                    _ => "finished".into(),
-                };
-                self.notify_send(&id, &what);
+            if let Some(what) = noteworthy(was, now).filter(|_| !watching) {
+                self.ring |= self.bell;
+                if self.notify {
+                    let what = match what {
+                        Phase::Waiting => format!("needs you: {}", waiting_for.unwrap_or_default()),
+                        _ => "finished".into(),
+                    };
+                    self.notify_send(&id, &what);
+                }
             }
         }
         self.phase.retain(|id, _| self.lives.iter().any(|l| &l.id == id));
@@ -1180,6 +1268,12 @@ impl App {
         }
     }
 
+    fn toggle_bell(&mut self) {
+        self.bell = !self.bell;
+        set_flag("bell-off", !self.bell);
+        self.info(if self.bell { "bell on · :bell turns it off" } else { "bell off · :bell turns it back on" });
+    }
+
     fn toggle_notify(&mut self) {
         self.notify = !self.notify;
         set_flag("notify-off", !self.notify);
@@ -1192,6 +1286,14 @@ enum Phase {
     Idle,
     Busy,
     Waiting,
+}
+
+/// Waiting chats before ones that finished unseen, each longest-waiting first
+/// (then list order); the one after the current selection, wrapping around.
+fn next_attention(mut cands: Vec<(u8, Instant, usize, String)>, cur: Option<&str>) -> Option<String> {
+    cands.sort();
+    let next = cands.iter().position(|c| Some(c.3.as_str()) == cur).map_or(0, |p| (p + 1) % cands.len());
+    cands.into_iter().nth(next).map(|c| c.3)
 }
 
 /// Which phase changes deserve a desktop notification: finishing a turn, and
@@ -1285,6 +1387,18 @@ fn main() -> std::io::Result<()> {
             last_gen = generation;
             last_draw = Instant::now();
             dirty = false;
+        }
+        // Between frames, so nothing interleaves with ratatui's output.
+        let clip = live::take_clipboard();
+        if !clip.is_empty() || app.ring {
+            use std::io::Write;
+            for c in clip {
+                let _ = out.write_all(&c);
+            }
+            if std::mem::take(&mut app.ring) {
+                let _ = out.write_all(b"\x07");
+            }
+            let _ = out.flush();
         }
         if event::poll(Duration::from_millis(16))? {
             // Drain everything queued so a fast typist doesn't wait on redraws.
@@ -1470,6 +1584,25 @@ mod tests {
         assert_eq!(noteworthy(Some(Waiting), Busy), None);
         assert_eq!(noteworthy(Some(Waiting), Idle), None);
         assert_eq!(noteworthy(Some(Idle), Busy), None);
+    }
+
+    #[test]
+    fn attention_goes_waiting_first_then_oldest_and_cycles() {
+        let t = Instant::now();
+        let later = t + Duration::from_secs(5);
+        let c = || {
+            vec![
+                (1, t, 0, "unseen".to_string()),
+                (0, later, 1, "new-wait".to_string()),
+                (0, t, 2, "old-wait".to_string()),
+            ]
+        };
+        assert_eq!(next_attention(c(), None).as_deref(), Some("old-wait"));
+        assert_eq!(next_attention(c(), Some("old-wait")).as_deref(), Some("new-wait"));
+        assert_eq!(next_attention(c(), Some("new-wait")).as_deref(), Some("unseen"));
+        assert_eq!(next_attention(c(), Some("unseen")).as_deref(), Some("old-wait"));
+        assert_eq!(next_attention(c(), Some("elsewhere")).as_deref(), Some("old-wait"));
+        assert_eq!(next_attention(vec![], None), None);
     }
 
     #[test]
