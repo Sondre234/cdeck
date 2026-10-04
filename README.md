@@ -97,7 +97,7 @@ search) and is stored in cdeck's own state; `~/.claude` is never written.
 | Key | Action |
 |-----|--------|
 | `Ctrl-→` `Ctrl-←` | focus one step right / left: chat list, pane (left half, right half when split) |
-| `Ctrl-w l` `Ctrl-w h` / `g→` `g←` | same, helix window style |
+| `Ctrl-w l` `Ctrl-w h` / `g→` `g←` / `gl` `gh` | same, helix window style |
 | `Ctrl-w w` | next: chat list → pane → right half → chat list |
 | `Ctrl-w v` | split the pane: keep the selected chat on the right |
 | `Ctrl-w q` `Ctrl-w o` | close the split |
