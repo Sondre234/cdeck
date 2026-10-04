@@ -1,3 +1,4 @@
+mod config;
 mod data;
 mod dirpick;
 mod theme;
@@ -38,7 +39,6 @@ pub enum Focus {
     Pane,
 }
 
-const GROUP_LIMIT: usize = 5;
 /// Pseudo session id for the "+ New chat" row.
 pub const NEW_CHAT: &str = "+new";
 
@@ -145,7 +145,7 @@ impl App {
             filter: String::new(),
             search: Default::default(),
             live_only: false,
-            msg: None,
+            msg: config::error().map(|e| (e.into(), true)),
             preview: None,
             wrapped: None,
             jump_to_match: None,
@@ -297,7 +297,7 @@ impl App {
             let mut items = Vec::new();
             for (_, i) in v {
                 let keep = open
-                    || shown < GROUP_LIMIT
+                    || shown < config::cfg().group_limit
                     || self.live(&i.id).is_some()
                     || self.running.contains_key(&i.id)
                     || self.selected.as_deref() == Some(i.id.as_str());
@@ -312,7 +312,7 @@ impl App {
             self.rows.extend(items);
             if hidden > 0 {
                 self.rows.push(Row::More { hidden });
-            } else if self.expanded.contains(&cwd) && count > GROUP_LIMIT {
+            } else if self.expanded.contains(&cwd) && count > config::cfg().group_limit {
                 self.rows.push(Row::More { hidden: 0 });
             }
         }
@@ -738,6 +738,11 @@ impl App {
             "notify" => self.toggle_notify(),
             "mouse" => self.toggle_mouse(),
             "h" | "help" => self.help = true,
+            "config" => {
+                let p = config::path();
+                let state = if p.exists() { "" } else { " (not created yet — defaults in use)" };
+                self.info(&format!("config: {}{state}", data::tilde(&p)));
+            }
             _ => self.error(&format!("unknown command: {cmd}")),
         }
     }

@@ -25,11 +25,11 @@ The chat list (sidebar) is on the left, the pane on the right. The pane shows
 the selected chat: a live Claude session if it's running in cdeck, otherwise a
 read-only preview of its transcript.
 
-Below 100 columns (e.g. a half-width window in a tiling WM) only one of them is
+Below 100 columns (`narrow_width` in the [config](#config); e.g. a half-width window in a tiling WM) only one of them is
 shown at a time: whichever has focus. `Ctrl-\` from a chat brings the list
 back; opening a chat shows it.
 
-Directories with many chats show their 5 newest; `z` expands them.
+Directories with many chats show their 5 newest (`group_limit`); `z` expands them.
 
 ## Modes
 
@@ -180,6 +180,7 @@ Example: `/borrow dir:rust age:<1w`. `Enter` keeps the filter, `Esc` clears it.
 | `:mouse` | mouse capture on / off |
 | `:refresh` / `:r` | rescan transcripts |
 | `:help` / `:h` | full help |
+| `:config` | show the config file's path, and whether it exists |
 | `:q` / `:q!` | quit / quit and kill live instances (transcripts are kept) |
 
 ## Status glyphs
@@ -207,11 +208,27 @@ Opens `claude --resume <id>` in the chat's directory in a new terminal window.
 Uses `$TERMINAL` if set, otherwise the first of `kitty`, `foot`, `alacritty`,
 `wezterm`, `ghostty`, `xterm` found on `$PATH`.
 
+## Config
+
+Optional, at `$XDG_CONFIG_HOME/cdeck/config.toml` (default
+`~/.config/cdeck/config.toml`). Read once at startup; every key is optional and
+unknown keys are ignored. If the file doesn't parse, cdeck says so in the footer
+and uses the defaults. `:config` shows where it looks.
+
+```toml
+# Below this many columns, show either the chat list or the chat, not both.
+narrow_width = 100
+
+# Chats listed per directory before the rest fold behind "… n more" (z).
+group_limit = 5
+```
+
 ## Files and environment
 
 | Path / variable | Purpose |
 |-----------------|---------|
 | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | where transcripts and session status are read from — never written |
+| `$XDG_CONFIG_HOME/cdeck/config.toml` (default `~/.config/cdeck/`) | settings, see [Config](#config) |
 | `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
 | `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed-title cache so startup doesn't reread every transcript; safe to delete |
 | `$TERMINAL` | terminal used by `E` / `:win` |

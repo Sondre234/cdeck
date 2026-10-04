@@ -1,3 +1,4 @@
+use crate::config::cfg;
 use crate::data::{self, Entry};
 use crate::theme::{self, th};
 use crate::{App, Focus, Mode, Row, Status, NEW_CHAT};
@@ -28,12 +29,10 @@ pub fn dir_color(p: &Path) -> Color {
 /// modes never resizes the Claude instances.
 const KEYMAP_ROWS: u16 = 3;
 
-/// Below this many columns (e.g. a half-width tiled window) the chat list and
-/// the chat take turns filling the screen instead of sitting side by side.
-const NARROW: u16 = 100;
-
+/// Below `narrow_width` columns (e.g. a half-width tiled window) the chat list
+/// and the chat take turns filling the screen instead of sitting side by side.
 pub fn is_narrow(area: Rect) -> bool {
-    area.width < NARROW
+    area.width < cfg().narrow_width
 }
 
 fn split_areas(area: Rect, keymap: bool) -> (Rect, Rect, Rect, Rect) {
@@ -1072,6 +1071,7 @@ fn draw_help(f: &mut Frame) {
                 (":resume!", "resume even if running elsewhere"),
                 (":notify", "desktop notifications on / off"),
                 (":mouse", "mouse capture off / on, like M"),
+                (":config", "where the config file lives"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
         ),
