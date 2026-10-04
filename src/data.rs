@@ -234,50 +234,112 @@ pub fn transcript(file: &Path) -> Vec<Entry> {
     let mut out = Vec::new();
     let Ok(txt) = fs::read_to_string(file) else { return out };
     for line in txt.lines() {
-        if !(line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")) {
-            continue;
-        }
-        let Ok(v) = serde_json::from_str::<Value>(line) else { continue };
-        if v["isSidechain"].as_bool() == Some(true) || v["isMeta"].as_bool() == Some(true) {
-            continue;
-        }
-        let content = &v["message"]["content"];
-        match v["type"].as_str() {
-            Some("user") => {
-                if let Some(t) = user_text(content) {
-                    if let Some(cmd) = between(&t, "<command-name>", "</command-name>") {
-                        out.push(Entry::User(cmd.into()));
-                    } else if !t.starts_with('<') {
-                        out.push(Entry::User(t));
-                    }
-                }
-            }
-            Some("assistant") => {
-                for b in content.as_array().into_iter().flatten() {
-                    match b["type"].as_str() {
-                        Some("text") => {
-                            if let Some(t) = b["text"].as_str().filter(|t| !t.trim().is_empty()) {
-                                out.push(Entry::Assistant(t.trim().into()));
-                            }
-                        }
-                        Some("tool_use") => {
-                            let name = b["name"].as_str().unwrap_or("?");
-                            let i = &b["input"];
-                            let arg = ["description", "command", "file_path", "pattern", "url", "query", "prompt"]
-                                .iter()
-                                .find_map(|k| i[k].as_str())
-                                .map(one_line)
-                                .unwrap_or_default();
-                            out.push(Entry::Tool(format!("{name}({arg})")));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            _ => {}
-        }
+        line_entries(line, &mut out);
     }
     out
+}
+
+/// The displayable entries of one transcript line.
+fn line_entries(line: &str, out: &mut Vec<Entry>) {
+    if !(line.contains("\"type\":\"user\"") || line.contains("\"type\":\"assistant\"")) {
+        return;
+    }
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    if v["isSidechain"].as_bool() == Some(true) || v["isMeta"].as_bool() == Some(true) {
+        return;
+    }
+    let content = &v["message"]["content"];
+    match v["type"].as_str() {
+        Some("user") => {
+            if let Some(t) = user_text(content) {
+                if let Some(cmd) = between(&t, "<command-name>", "</command-name>") {
+                    out.push(Entry::User(cmd.into()));
+                } else if !t.starts_with('<') {
+                    out.push(Entry::User(t));
+                }
+            }
+        }
+        Some("assistant") => {
+            for b in content.as_array().into_iter().flatten() {
+                match b["type"].as_str() {
+                    Some("text") => {
+                        if let Some(t) = b["text"].as_str().filter(|t| !t.trim().is_empty()) {
+                            out.push(Entry::Assistant(t.trim().into()));
+                        }
+                    }
+                    Some("tool_use") => {
+                        let name = b["name"].as_str().unwrap_or("?");
+                        let i = &b["input"];
+                        let arg = ["description", "command", "file_path", "pattern", "url", "query", "prompt"]
+                            .iter()
+                            .find_map(|k| i[k].as_str())
+                            .map(one_line)
+                            .unwrap_or_default();
+                        out.push(Entry::Tool(format!("{name}({arg})")));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+/// First user/assistant message in a transcript containing `needle`
+/// (already lowercased), as a one-line snippet around the match.
+pub fn find_in_transcript(file: &Path, needle: &str, cancelled: impl Fn() -> bool) -> Option<String> {
+    let txt = fs::read_to_string(file).ok()?;
+    // Cheap raw-bytes prefilter so only candidate lines get JSON-parsed. JSON
+    // escapes quotes and backslashes, so needles with those skip it.
+    let prefilter = !needle.contains(['"', '\\']);
+    let mut entries = Vec::new();
+    for (n, line) in txt.lines().enumerate() {
+        if n % 256 == 0 && cancelled() {
+            return None;
+        }
+        if prefilter && !contains_ci(line, needle) {
+            continue;
+        }
+        entries.clear();
+        line_entries(line, &mut entries);
+        for e in &entries {
+            let (Entry::User(t) | Entry::Assistant(t)) = e else { continue };
+            if let Some(s) = snippet(t, needle) {
+                return Some(s);
+            }
+        }
+    }
+    None
+}
+
+/// Case-insensitive substring test; `needle` must already be lowercase.
+fn contains_ci(hay: &str, needle: &str) -> bool {
+    if needle.is_ascii() {
+        let (h, n) = (hay.as_bytes(), needle.as_bytes());
+        n.is_empty() || h.windows(n.len()).any(|w| w.eq_ignore_ascii_case(n))
+    } else {
+        hay.to_lowercase().contains(needle)
+    }
+}
+
+/// `…some words around the match…` from `text`, or None if it isn't there.
+fn snippet(text: &str, needle: &str) -> Option<String> {
+    let flat = one_line(text);
+    let lower = flat.to_lowercase();
+    // Lowercasing can change byte lengths; map the hit back via char counts.
+    let at = lower[..lower.find(needle)?].chars().count();
+    let chars: Vec<char> = flat.chars().collect();
+    let at = at.min(chars.len());
+    let start = at.saturating_sub(30);
+    let end = (at + needle.chars().count() + 80).min(chars.len());
+    let mut s: String = chars[start..end].iter().collect();
+    if start > 0 {
+        s.insert(0, '…');
+    }
+    if end < chars.len() {
+        s.push('…');
+    }
+    Some(s)
 }
 
 fn between<'a>(s: &'a str, a: &str, b: &str) -> Option<&'a str> {

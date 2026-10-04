@@ -3,6 +3,7 @@ mod dirpick;
 mod theme;
 mod keys;
 mod live;
+mod search;
 mod ui;
 
 use crossterm::event::{
