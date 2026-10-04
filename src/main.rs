@@ -217,13 +217,14 @@ impl App {
                 Item { id: l.id.clone(), cwd: l.cwd.clone(), title: s.title().into(), branch: None, mtime: s.mtime, snippet: None }
             });
         }
-        let f = self.filter.to_lowercase();
+        let query = search::Query::parse(&self.filter);
+        let f = query.text.to_lowercase();
         let now = SystemTime::now();
         let mut groups: HashMap<PathBuf, Vec<(SystemTime, Item)>> = HashMap::new();
         let content = (self.search.query == f).then_some(&self.search.hits);
         for mut it in items.into_values() {
             let active = self.live(&it.id).is_some() || self.running.contains_key(&it.id);
-            if self.live_only && !active {
+            if (self.live_only && !active) || !query.admits(&it.cwd, it.mtime) {
                 continue;
             }
             if !f.is_empty()
@@ -645,7 +646,7 @@ impl App {
     /// Kick off a transcript search for the current filter.
     fn update_search(&mut self) {
         let files = self.search_files().into_iter().map(|(id, f, _)| (id, f)).collect();
-        self.search.start(&self.filter, files);
+        self.search.start(&search::Query::parse(&self.filter).text, files);
         self.jump_to_match = self.selected.clone();
     }
 

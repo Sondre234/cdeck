@@ -969,6 +969,7 @@ fn draw_help(f: &mut Frame) {
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
                 ("Ctrl-w ← →", "same, helix window style (also g← g→)"),
                 ("/", "search titles, dirs and chat text"),
+                ("  dir:x age:<7d", "filter: dir contains x / newer (>2w: older)"),
                 ("space", "menu"),
             ],
         ),
@@ -1090,7 +1091,14 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
         ),
         (Mode::Search, _) => (
             "/ search",
-            &[("type", "titles, dirs + chat text"), ("⏎", "keep filter"), ("Esc", "clear filter"), ("Ctrl-u", "clear text")],
+            &[
+                ("type", "titles, dirs + chat text"),
+                ("dir:x", "only dirs containing x"),
+                ("age:<7d >2w", "newer / older (m h d w)"),
+                ("⏎", "keep filter"),
+                ("Esc", "clear filter"),
+                ("Ctrl-u", "clear text"),
+            ],
         ),
         (Mode::Space, _) => (
             "space",
