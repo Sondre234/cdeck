@@ -80,6 +80,14 @@ pub struct Live {
 /// Bumped by every reader thread; the UI redraws when it changes.
 pub static GENERATION: AtomicU64 = AtomicU64::new(0);
 
+/// OSC 52 sequences waiting for the main thread. Writing them from the reader
+/// thread could land in the middle of a frame ratatui is drawing.
+static CLIPBOARD: Mutex<Vec<Vec<u8>>> = Mutex::new(Vec::new());
+
+pub fn take_clipboard() -> Vec<Vec<u8>> {
+    std::mem::take(&mut CLIPBOARD.lock().unwrap())
+}
+
 impl Live {
     pub fn spawn(id: &str, cwd: &Path, args: &[String], size: (u16, u16)) -> anyhow_lite::Result<Live> {
         let pty = native_pty_system().openpty(PtySize { rows: size.0, cols: size.1, pixel_width: 0, pixel_height: 0 })?;
@@ -122,11 +130,7 @@ impl Live {
                         let _ = w.flush();
                     }
                     if !clip.is_empty() {
-                        let mut out = std::io::stdout().lock();
-                        for c in clip {
-                            let _ = out.write_all(&c);
-                        }
-                        let _ = out.flush();
+                        CLIPBOARD.lock().unwrap().extend(clip);
                     }
                     *last_output.lock().unwrap() = Instant::now();
                     GENERATION.fetch_add(1, Ordering::Relaxed);

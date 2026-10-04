@@ -1242,6 +1242,15 @@ fn main() -> std::io::Result<()> {
             last_draw = Instant::now();
             dirty = false;
         }
+        // Between frames, so nothing interleaves with ratatui's output.
+        let clip = live::take_clipboard();
+        if !clip.is_empty() {
+            use std::io::Write;
+            for c in clip {
+                let _ = out.write_all(&c);
+            }
+            let _ = out.flush();
+        }
         if event::poll(Duration::from_millis(16))? {
             // Drain everything queued so a fast typist doesn't wait on redraws.
             loop {
