@@ -1,7 +1,7 @@
 //! Reading Claude Code's on-disk state: session transcripts under
 //! ~/.claude/projects and the per-process status files under ~/.claude/sessions.
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Local, NaiveDate, Utc};
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::fs;
@@ -49,8 +49,39 @@ pub struct Session {
     ai_title: Option<String>,
     custom_title: Option<String>,
     first_prompt: Option<String>,
+    /// Token usage per local day, oldest first, so totals and "today" both
+    /// come from the cache without rereading transcripts.
+    usage: Vec<(NaiveDate, Usage)>,
+    /// Claude Code writes one line per content block, each repeating the
+    /// message's usage; those lines are adjacent, so the last id dedupes them.
+    last_msg: Option<String>,
     // Incremental parse state: transcripts are append-only.
     offset: u64,
+}
+
+/// Tokens of one or more API messages.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_write: u64,
+    pub cache_read: u64,
+}
+
+impl Usage {
+    /// Everything the model read: fresh, cache-written and cache-read input.
+    pub fn input_total(&self) -> u64 {
+        self.input + self.cache_write + self.cache_read
+    }
+}
+
+impl std::ops::AddAssign for Usage {
+    fn add_assign(&mut self, o: Usage) {
+        self.input += o.input;
+        self.output += o.output;
+        self.cache_write += o.cache_write;
+        self.cache_read += o.cache_read;
+    }
 }
 
 impl Session {
@@ -64,6 +95,19 @@ impl Session {
 
     pub fn new_placeholder(id: &str, cwd: &Path) -> Self {
         Session { id: id.into(), cwd: cwd.into(), mtime: Some(SystemTime::now()), ..Default::default() }
+    }
+
+    /// Tokens used over the whole chat (its own transcript; subagents keep theirs elsewhere).
+    pub fn usage(&self) -> Usage {
+        self.usage_since(NaiveDate::MIN)
+    }
+
+    pub fn usage_since(&self, day: NaiveDate) -> Usage {
+        let mut u = Usage::default();
+        for (_, d) in self.usage.iter().filter(|(d, _)| *d >= day) {
+            u += *d;
+        }
+        u
     }
 
     fn has_content(&self) -> bool {
@@ -104,6 +148,8 @@ impl Session {
             "ai_title": self.ai_title,
             "custom_title": self.custom_title,
             "first_prompt": self.first_prompt,
+            "usage": self.usage.iter().map(|(d, u)| json!([d.to_string(), u.input, u.output, u.cache_write, u.cache_read])).collect::<Vec<_>>(),
+            "last_msg": self.last_msg,
         }))
     }
 
@@ -119,6 +165,16 @@ impl Session {
             ai_title: s("ai_title"),
             custom_title: s("custom_title"),
             first_prompt: s("first_prompt"),
+            usage: v["usage"]
+                .as_array()?
+                .iter()
+                .map(|e| {
+                    let n = |i: usize| e[i].as_u64();
+                    let day = e[0].as_str()?.parse().ok()?;
+                    Some((day, Usage { input: n(1)?, output: n(2)?, cache_write: n(3)?, cache_read: n(4)? }))
+                })
+                .collect::<Option<_>>()?,
+            last_msg: s("last_msg"),
         })
     }
 
@@ -133,6 +189,17 @@ impl Session {
         }
         if let Some(b) = str_field(line, "gitBranch").filter(|b| !b.is_empty() && *b != "HEAD") {
             self.branch = Some(b.into());
+        }
+        if let Some((id, u)) = message_usage(line).filter(|(id, _)| self.last_msg.as_deref() != Some(*id)) {
+            self.last_msg = Some(id.into());
+            let day = str_field(line, "timestamp")
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                .map(|t| t.with_timezone(&Local).date_naive())
+                .unwrap_or_default();
+            match self.usage.last_mut() {
+                Some((d, acc)) if *d == day => *acc += u,
+                _ => self.usage.push((day, u)),
+            }
         }
         let interesting = line.contains("\"type\":\"ai-title\"")
             || line.contains("\"type\":\"custom-title\"")
@@ -168,6 +235,32 @@ fn str_field<'a>(line: &'a str, key: &str) -> Option<&'a str> {
     Some(&line[i..j])
 }
 
+/// The id and usage of an assistant API message, by string search: these are
+/// most lines of a transcript, too many to JSON-parse on every startup.
+fn message_usage(line: &str) -> Option<(&str, Usage)> {
+    // Assistant messages open with the model; user messages with their role.
+    let pat = "\"message\":{\"model\":\"";
+    let rest = &line[line.find(pat)? + pat.len()..];
+    let id = between(rest, "\"id\":\"", "\"")?;
+    let u = &rest[rest.find("\"usage\":{")?..];
+    // The first hit of each key is the top-level one; nested copies
+    // (`iterations`) come after them, and keys inside strings are escaped.
+    let n = |k: &str| -> Option<u64> {
+        let pat = format!("\"{k}\":");
+        let v = &u[u.find(&pat)? + pat.len()..];
+        v[..v.find(|c: char| !c.is_ascii_digit()).unwrap_or(v.len())].parse().ok()
+    };
+    Some((
+        id,
+        Usage {
+            input: n("input_tokens")?,
+            output: n("output_tokens")?,
+            cache_write: n("cache_creation_input_tokens").unwrap_or(0),
+            cache_read: n("cache_read_input_tokens").unwrap_or(0),
+        },
+    ))
+}
+
 fn one_line(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -184,7 +277,7 @@ fn user_text(content: &Value) -> Option<String> {
 }
 
 /// Bump whenever the cache's shape or what `Session::ingest` extracts changes.
-const CACHE_VERSION: u64 = 1;
+const CACHE_VERSION: u64 = 2;
 
 /// Parse state survives restarts here, so startup only reads what was
 /// appended since (history runs to hundreds of MB).
@@ -280,6 +373,16 @@ impl Store {
         } else {
             let _ = fs::remove_file(&tmp);
         }
+    }
+
+    /// Tokens used today (local time) across every chat.
+    pub fn usage_today(&self) -> Usage {
+        let today = Local::now().date_naive();
+        let mut u = Usage::default();
+        for s in self.sessions.values() {
+            u += s.usage_since(today);
+        }
+        u
     }
 
     pub fn visible(&self) -> impl Iterator<Item = &Session> {
@@ -532,6 +635,25 @@ mod tests {
     }
 
     #[test]
+    fn usage_counts_each_message_once() {
+        let line = |id: &str, block: &str, out: u64| {
+            format!(
+                r#"{{"type":"assistant","timestamp":"2026-10-04T12:00:00Z","message":{{"model":"m","id":"{id}","content":[{block}],"usage":{{"input_tokens":2,"cache_creation_input_tokens":10,"cache_read_input_tokens":100,"output_tokens":{out},"output_tokens_details":{{"thinking_tokens":1}},"iterations":[{{"input_tokens":9,"output_tokens":9}}]}}}}}}"#
+            )
+        };
+        let mut s = Session::default();
+        s.ingest(line("a", r#"{"type":"text","text":"\"usage\":{\"input_tokens\":7"}"#, 5).as_bytes());
+        s.ingest(line("a", r#"{"type":"tool_use","id":"toolu_1","input":{}}"#, 5).as_bytes());
+        s.ingest(line("b", r#"{"type":"text","text":"hi"}"#, 3).as_bytes());
+        s.ingest(br#"{"type":"user","message":{"role":"user","content":"x"},"toolUseResult":{"usage":{"input_tokens":50}}}"#);
+        assert_eq!(s.usage(), Usage { input: 4, output: 8, cache_write: 20, cache_read: 200 });
+        assert_eq!(s.usage().input_total(), 224);
+        let back = Session::from_json(&s.to_json().unwrap()).unwrap();
+        assert_eq!((back.usage(), back.last_msg.as_deref()), (s.usage(), Some("b")));
+        assert_eq!(message_usage(&line("c", "", 1)).map(|(id, _)| id), Some("c"));
+    }
+
+    #[test]
     fn cache_resumes_parsing_and_survives_rewrites() {
         let dir = std::env::temp_dir().join(format!("cdeck-cache-test-{}", std::process::id()));
         let root = dir.join("projects");
@@ -571,7 +693,7 @@ mod tests {
         assert_eq!(c.sessions["abc"].title(), "new");
 
         // Corrupt or outdated caches are ignored.
-        for bad in ["{not json".to_string(), txt.replace("\"version\":1", "\"version\":0")] {
+        for bad in ["{not json".to_string(), txt.replace("\"version\":2", "\"version\":1")] {
             fs::write(&cache, bad).unwrap();
             let mut d = Store::default();
             d.load(&cache);

@@ -213,7 +213,7 @@ Uses `$TERMINAL` if set, otherwise the first of `kitty`, `foot`, `alacritty`,
 |-----------------|---------|
 | `$CLAUDE_CONFIG_DIR` (default `~/.claude`) | where transcripts and session status are read from — never written |
 | `$XDG_STATE_HOME/cdeck/` (default `~/.local/state/cdeck/`) | `pinned`, `archived` (one session id per line), and flag files `keymap-hidden`, `notify-off`, `mouse-off` |
-| `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed-title cache so startup doesn't reread every transcript; safe to delete |
+| `$XDG_CACHE_HOME/cdeck/sessions.json` (default `~/.cache/cdeck/`) | parsed titles and token usage, so startup doesn't reread every transcript; safe to delete |
 | `$TERMINAL` | terminal used by `E` / `:win` |
 | `$CDECK_CLAUDE` | program to run instead of `claude` (testing) |
 
