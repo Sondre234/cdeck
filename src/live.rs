@@ -206,6 +206,16 @@ impl Live {
         self.write(&one.repeat(ticks));
     }
 
+    /// The permission dialog on screen, read from the live view (not scrollback).
+    pub fn prompt(&self) -> Option<Prompt> {
+        let mut p = self.parser.lock().unwrap();
+        let back = p.screen().scrollback();
+        p.screen_mut().set_scrollback(0);
+        let text = p.screen().contents();
+        p.screen_mut().set_scrollback(back);
+        find_prompt(&text)
+    }
+
     pub fn reset_scroll(&self) {
         self.parser.lock().unwrap().screen_mut().set_scrollback(0);
     }
@@ -225,7 +235,152 @@ impl Drop for Live {
     }
 }
 
+/// Claude Code's tool permission dialog, as it appears on screen:
+///
+/// ```text
+///  Bash command
+///    ls -la
+///    List files
+///  Do you want to proceed?
+///  ❯ 1. Yes
+///    2. Yes, and don't ask again for: ls *
+///    3. No
+/// ```
+#[derive(Debug, PartialEq)]
+pub struct Prompt {
+    /// The dialog's title and what it's about, for the footer.
+    pub summary: String,
+    /// The highlighted option is plain "Yes", so Enter allows exactly once.
+    pub yes_focused: bool,
+}
+
+/// Strip the box-drawing borders some dialogs are drawn in.
+fn unframe(line: &str) -> &str {
+    line.trim_matches(|c: char| c.is_whitespace() || "│┃╭╮╰╯".contains(c))
+}
+
+fn is_rule(line: &str) -> bool {
+    let t = line.trim();
+    t.chars().count() >= 3 && t.chars().all(|c| "─━═╌┄╭╮╰╯┌┐└┘▔▁ ".contains(c))
+}
+
+/// An option row's label without its pointer and "N." index.
+fn option_label(line: &str) -> (bool, &str) {
+    let t = unframe(line);
+    let (focused, t) = match t.strip_prefix('❯') {
+        Some(rest) => (true, rest.trim_start()),
+        None => (false, t),
+    };
+    let t = match t.split_once(". ") {
+        Some((n, rest)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => rest,
+        _ => t,
+    };
+    (focused, t.trim())
+}
+
+/// Find the dialog in a screen dump: a "Do you want to …?" question followed
+/// by options that include a "Yes" and a "No". Anything else (an AskUserQuestion, a
+/// half-drawn frame) is None, so we never send keys into the unknown.
+pub fn find_prompt(screen: &str) -> Option<Prompt> {
+    let lines: Vec<&str> = screen.lines().collect();
+    let q = lines.iter().rposition(|l| {
+        let t = unframe(l);
+        t.starts_with("Do you want to ") && t.ends_with('?')
+    })?;
+    let options: Vec<(bool, &str)> =
+        lines[q + 1..].iter().map(|l| option_label(l)).filter(|(_, t)| !t.is_empty()).take(8).collect();
+    let has = |w: &str| options.iter().any(|(_, t)| t.strip_prefix(w).is_some_and(|r| r.is_empty() || r.starts_with([',', ' '])));
+    if !has("Yes") || !has("No") {
+        return None;
+    }
+    let yes_focused = options.iter().find(|(f, _)| *f).is_some_and(|(_, t)| *t == "Yes");
+    // What it's about: the lines above the question, back to a rule or a gap.
+    let mut about = Vec::new();
+    let mut blank = 0;
+    for l in lines[..q].iter().rev().take(12) {
+        if is_rule(l) {
+            break;
+        }
+        let t = unframe(l);
+        if t.is_empty() {
+            blank += 1;
+            if blank >= 2 && !about.is_empty() {
+                break;
+            }
+            continue;
+        }
+        blank = 0;
+        about.push(t);
+    }
+    about.reverse();
+    Some(Prompt { summary: about.join(" · "), yes_focused })
+}
+
 /// portable-pty returns anyhow errors; keep our own surface tiny.
 pub mod anyhow_lite {
     pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const BASH: &str = "\
+ ⏺ I'll clean up.
+
+────────────────────────────────────────────────
+ Bash command
+
+   rm -rf target
+   Remove build output
+
+ Do you want to proceed?
+ ❯ 1. Yes
+   2. Yes, and don’t ask again for: rm -rf *
+   3. No
+
+ Esc to cancel · Tab to amend
+";
+
+    #[test]
+    fn reads_the_bash_dialog() {
+        let p = find_prompt(BASH).unwrap();
+        assert!(p.yes_focused);
+        assert_eq!(p.summary, "Bash command · rm -rf target · Remove build output");
+    }
+
+    #[test]
+    fn yes_must_be_the_highlighted_option() {
+        let moved = BASH.replace(" ❯ 1. Yes", "   1. Yes").replace("   3. No", " ❯ 3. No");
+        assert!(!find_prompt(&moved).unwrap().yes_focused);
+        let always = BASH.replace(" ❯ 1. Yes", "   1. Yes").replace("   2. Yes,", " ❯ 2. Yes,");
+        assert!(!find_prompt(&always).unwrap().yes_focused, "never \"don't ask again\" by accident");
+    }
+
+    #[test]
+    fn boxed_edit_dialog_with_tell_claude_option() {
+        let screen = "\
+╭──────────────────────────────────────────╮
+│ Edit file                                │
+│ src/main.rs                              │
+│ Do you want to make this edit to main.rs?│
+│ ❯ 1. Yes                                 │
+│   2. Yes, allow all edits this session   │
+│   3. No, and tell Claude what to do differently (esc) │
+╰──────────────────────────────────────────╯
+";
+        let p = find_prompt(screen).unwrap();
+        assert!(p.yes_focused);
+        assert_eq!(p.summary, "Edit file · src/main.rs");
+    }
+
+    #[test]
+    fn ignores_screens_without_a_permission_dialog() {
+        assert_eq!(find_prompt(">\n  ? for shortcuts\n"), None);
+        assert_eq!(find_prompt(&BASH.replace("Do you want to proceed?", "")), None);
+        // A question in Claude's reply, with nothing to pick under it.
+        assert_eq!(find_prompt(" ⏺ Do you want to keep the old API?\n\n>\n"), None);
+        // AskUserQuestion-style choices without a "No".
+        assert_eq!(find_prompt(" Do you want to use tabs or spaces?\n ❯ 1. Tabs\n   2. Spaces\n"), None);
+    }
 }
