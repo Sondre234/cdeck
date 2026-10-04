@@ -1,6 +1,6 @@
 # cdeck
 
-A terminal deck for [Claude Code](https://claude.com/claude-code): every chat
+A terminal deck for claude code every chat
 you've had, grouped by directory, with live Claude sessions running in a pane
 next to the list. Helix-style keys, claude.ai-style new-chat screen.
 
