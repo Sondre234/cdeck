@@ -142,6 +142,8 @@ pub fn draw(f: &mut Frame, app: &mut App) {
                 ("k", "kill instance"),
                 ("F", "fork chat"),
                 ("p", "pin / unpin chat"),
+                ("x", "archive / unarchive"),
+                ("a", "show archived"),
                 ("l", "toggle live-only"),
                 ("r", "rescan"),
                 ("?", "help"),
@@ -300,13 +302,22 @@ fn draw_sidebar(f: &mut Frame, app: &mut App, area: Rect) {
                 // Out of its group, a pinned chat names its directory instead.
                 let dir = if in_pins { trunc(&basename(&it.cwd), w / 3) } else { String::new() };
                 let title = trunc(&it.title, w.saturating_sub(8 + age.width() + if in_pins { dir.width() + 1 } else { 0 }));
+                let archived = app.archived.contains(&it.id);
                 let mut title_style = Style::new().fg(if live || selected { Color::Reset } else { th().muted });
                 if unseen || selected {
                     title_style = title_style.bold();
                 }
+                // Only visible under :archived (or while still running).
+                let glyph = match app.status(&it.id) {
+                    Status::Dormant if archived => Span::styled("×", Style::new().fg(th().faint)),
+                    _ => status_glyph(app, &it.id),
+                };
+                if archived {
+                    title_style = title_style.fg(th().faint).italic();
+                }
                 let mut spans = vec![
                     Span::styled("  │ ", Style::new().fg(c)),
-                    status_glyph(app, &it.id),
+                    glyph,
                     Span::raw(" "),
                     Span::styled(title, title_style),
                 ];
@@ -917,7 +928,12 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
             )),
         },
     }
-    let mut right = format!("{} live · {} chats ", app.lives.len(), app.store.visible().count());
+    let archived = app.store.visible().filter(|s| app.archived.contains(&s.id)).count();
+    let chats = app.store.visible().count() - if app.show_archived { 0 } else { archived };
+    let mut right = format!("{} live · {chats} chats ", app.lives.len());
+    if app.show_archived {
+        right = format!("{archived} archived · {right}");
+    }
     if !app.filter.is_empty() && app.mode != Mode::Search {
         right = format!("/{} · {right}", app.filter);
     }
@@ -975,6 +991,7 @@ fn draw_help(f: &mut Frame) {
                 ("d", "kill live instance"),
                 ("F", "fork: continue a copy as a new chat"),
                 ("p", "pin / unpin: keep it at the top"),
+                ("x", "archive: hide it (transcript kept)"),
                 ("z", "expand / fold a directory"),
                 ("Tab S-Tab", "cycle live chats"),
                 ("Ctrl-→ Ctrl-←", "focus pane / chat list"),
@@ -1009,6 +1026,8 @@ fn draw_help(f: &mut Frame) {
                 (":open [dir]", "start claude there, no prompt (fuzzy too)"),
                 (":kill  :live", "kill instance / live-only view"),
                 (":fork  :pin", "fork / pin the selected chat"),
+                (":archive", "archive / unarchive the selected chat"),
+                (":archived", "show / hide archived chats"),
                 (":resume!", "resume even if running elsewhere"),
                 (":q  :q!", "quit / quit killing instances"),
             ],
@@ -1094,6 +1113,8 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("kill", "kill instance"),
                 ("fork", "fork chat"),
                 ("pin", "pin / unpin"),
+                ("archive", "toggle archived"),
+                ("archived", "show archived"),
                 ("live", "live-only view"),
                 ("resume!", "resume anyway"),
                 ("q / q!", "quit / force"),
@@ -1114,6 +1135,8 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("k", "kill instance"),
                 ("F", "fork chat"),
                 ("p", "pin / unpin"),
+                ("x", "archive"),
+                ("a", "show archived"),
                 ("l", "live-only"),
                 ("r", "rescan"),
                 ("?", "full help"),
@@ -1147,10 +1170,10 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
                 ("↑↓ ←→", "chat / dir"),
                 ("⏎", "open / resume"),
                 ("n", "new chat"),
-                ("o", "new, no prompt"),
                 ("d", "kill"),
                 ("F", "fork chat"),
                 ("p", "pin / unpin"),
+                ("x", "archive"),
                 ("z", "expand dir"),
                 ("Tab", "next live chat"),
                 ("/", "search"),

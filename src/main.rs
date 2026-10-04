@@ -102,6 +102,9 @@ pub struct App {
     /// Which-key strip at the bottom; `?` toggles it and the choice is remembered.
     pub keymap: bool,
     pub pinned: HashSet<String>,
+    /// Hidden from the list; the transcripts themselves are never touched.
+    pub archived: HashSet<String>,
+    pub show_archived: bool,
     pub tick: usize,
     confirm_resume: Option<String>,
     was_busy: HashMap<String, bool>,
@@ -140,6 +143,8 @@ impl App {
             help: false,
             keymap: !keymap_hidden_flag().exists(),
             pinned: load_ids("pinned"),
+            archived: load_ids("archived"),
+            show_archived: false,
             tick: 0,
             confirm_resume: None,
             was_busy: HashMap::new(),
@@ -226,6 +231,10 @@ impl App {
         for mut it in items.into_values() {
             let active = self.live(&it.id).is_some() || self.running.contains_key(&it.id);
             if self.live_only && !active {
+                continue;
+            }
+            // Running chats stay put until they stop, so nothing live goes missing.
+            if !self.show_archived && !active && self.archived.contains(&it.id) {
                 continue;
             }
             if !f.is_empty()
@@ -538,6 +547,40 @@ impl App {
         }
     }
 
+    fn toggle_archive(&mut self) {
+        let Some(id) = self.selected_item().map(|i| i.id.clone()) else { return self.error("select a chat to archive") };
+        let archived = !self.archived.remove(&id);
+        let active = self.live(&id).is_some() || self.running.contains_key(&id);
+        let hides = archived && !active && !self.show_archived;
+        if archived {
+            self.archived.insert(id.clone());
+        }
+        // Step to a neighbour before it vanishes, rather than jumping to the top.
+        if hides {
+            let ids: Vec<&str> = self.item_ids().collect();
+            let pos = ids.iter().position(|&i| i == id).unwrap_or(0);
+            let next = ids.get(pos + 1).or_else(|| ids.get(pos.checked_sub(1)?)).map(|s| s.to_string());
+            self.select(next);
+        }
+        self.rebuild();
+        let msg = match (archived, hides, active) {
+            (false, ..) => "unarchived",
+            (true, true, _) => "archived · undo: :archived shows archived chats, then x on it",
+            (true, false, true) => "archived · hidden once it stops running · x again undoes",
+            (true, false, false) => "archived · x again undoes",
+        };
+        match save_ids("archived", &self.archived) {
+            Err(e) => self.error(&format!("couldn't save archive: {e}")),
+            Ok(()) => self.info(msg),
+        }
+    }
+
+    fn toggle_show_archived(&mut self) {
+        self.show_archived = !self.show_archived;
+        self.rebuild();
+        self.info(if self.show_archived { "showing archived chats · x unarchives" } else { "archived chats hidden" });
+    }
+
     fn kill_selected(&mut self) {
         let Some(id) = self.selected.clone() else { return };
         if let Some(pos) = self.lives.iter().position(|l| l.id == id) {
@@ -597,6 +640,8 @@ impl App {
             "k" | "kill" => self.kill_selected(),
             "fork" => self.fork_selected(),
             "pin" => self.toggle_pin(),
+            "archive" => self.toggle_archive(),
+            "archived" => self.toggle_show_archived(),
             "resume" | "resume!" => self.open(cmd.ends_with('!')),
             "r" | "refresh" => self.refresh(),
             "live" => {
@@ -785,6 +830,8 @@ impl App {
                     KeyCode::Char('k') => self.kill_selected(),
                     KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('p') => self.toggle_pin(),
+                    KeyCode::Char('x') => self.toggle_archive(),
+                    KeyCode::Char('a') => self.toggle_show_archived(),
                     KeyCode::Char('l') => {
                         self.live_only = !self.live_only;
                         self.rebuild();
@@ -867,6 +914,7 @@ impl App {
                     KeyCode::Char('d') => self.kill_selected(),
                     KeyCode::Char('F') => self.fork_selected(),
                     KeyCode::Char('p') => self.toggle_pin(),
+                    KeyCode::Char('x') => self.toggle_archive(),
                     KeyCode::Char('/') => self.start_search(),
                     KeyCode::Char(':') => self.mode = Mode::Command,
                     KeyCode::Char(' ') => self.mode = Mode::Space,
