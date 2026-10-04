@@ -31,6 +31,14 @@ back; opening a chat shows it.
 
 Directories with many chats show their 5 newest; `z` expands them.
 
+### Token usage
+
+The pane's title bar shows the chat's tokens, e.g. `12.3k out · 1.2M in`
+(`in` counts everything the model read, cached or not), and the footer shows
+today's output across all chats. Tokens rather than dollars, since on a
+subscription the bill doesn't change. Each chat counts its own transcript;
+subagents keep separate transcripts (`<id>/subagents/`) and aren't included.
+
 ## Modes
 
 The footer badge shows the current mode.

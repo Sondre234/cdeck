@@ -63,6 +63,15 @@ fn basename(p: &Path) -> String {
     p.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| data::tilde(p))
 }
 
+/// `816`, `12.3k`, `1.2M`: token counts short enough for a title bar.
+fn tokens(n: u64) -> String {
+    match n {
+        0..1000 => n.to_string(),
+        1000..999_950 => format!("{:.1}k", n as f64 / 1e3),
+        _ => format!("{:.1}M", n as f64 / 1e6),
+    }
+}
+
 /// Cut to `w` columns, appending … when something was dropped.
 fn trunc(s: &str, w: usize) -> String {
     if s.width() <= w {
@@ -403,6 +412,11 @@ fn draw_pane(f: &mut Frame, app: &mut App, area: Rect) {
     };
     if scrolled > 0 {
         right.push(Span::styled(format!(" · ↑{scrolled}"), Style::new().fg(th().muted)));
+    }
+    // Tokens, not dollars: on a subscription the bill doesn't change.
+    if let Some(u) = app.store.sessions.get(&item.id).map(|s| s.usage()).filter(|u| u.output > 0) {
+        let t = format!(" · {} out · {} in", tokens(u.output), tokens(u.input_total()));
+        right.push(Span::styled(t, Style::new().fg(th().faint)));
     }
     right.push(Span::styled(format!("  {} ", &item.id[..8.min(item.id.len())]), Style::new().fg(th().border)));
     let used: usize = spans.iter().chain(&right).map(|s| s.content.width()).sum();
@@ -959,6 +973,10 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
     let archived = app.store.visible().filter(|s| app.archived.contains(&s.id)).count();
     let chats = app.store.visible().count() - if app.show_archived { 0 } else { archived };
     let mut right = format!("{} live · {chats} chats ", app.lives.len());
+    let today = app.store.usage_today().output;
+    if today > 0 {
+        right = format!("{} out today · {right}", tokens(today));
+    }
     if app.show_archived {
         right = format!("{archived} archived · {right}");
     }
@@ -1316,6 +1334,11 @@ fn draw_keymap(f: &mut Frame, app: &App, area: Rect) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_counts_stay_short() {
+        assert_eq!([0, 816, 1000, 12_345, 999_949, 999_950, 1_234_567].map(tokens), ["0", "816", "1.0k", "12.3k", "999.9k", "1.0M", "1.2M"]);
+    }
 
     #[test]
     fn stamps_get_coarser_with_age() {
