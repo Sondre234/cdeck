@@ -781,7 +781,8 @@ fn draw_preview(f: &mut Frame, app: &mut App, id: &str, area: Rect) {
         if app.search.hits.contains_key(id) {
             // Put the match near the top, with a little context above it.
             if let Some(m) = match_line(app.preview.as_ref().unwrap().2.as_slice(), lines, owners, q) {
-                app.preview_scroll = lines.len().saturating_sub(m.saturating_sub(2) + h);
+                app.preview_scroll = lines.len().saturating_sub(m.saturating_sub(2) + h).min(max_scroll);
+                app.match_at = Some((id.into(), m, app.preview_scroll));
             }
             app.jump_to_match = None;
         } else if !app.search.running || q.chars().count() < crate::search::MIN_QUERY {
@@ -899,6 +900,7 @@ fn draw_footer(f: &mut Frame, app: &App, area: Rect) {
                 match (app.mode, app.focus) {
                     (Mode::Insert, _) => "typing into claude · Ctrl-\\ back to chats",
                     (Mode::Compose, _) => "writing a new chat · ⏎ start · Esc back",
+                    (_, Focus::Pane) if app.has_matches() => "n/N next/prev match · ↑↓ scroll · ← back to chats",
                     (_, Focus::Pane) => "↑↓ scroll · shift ↑↓ half page · Home/End · ⏎ type · ← back to chats",
                     _ => "↑↓ chat · ←→ directory · ⏎ open · n new chat · Ctrl-→ pane · d kill · / search · space menu · ? keys",
                 },
@@ -975,6 +977,7 @@ fn draw_help(f: &mut Frame) {
             &[
                 ("↑ ↓", "scroll 3 lines (shift: half page)"),
                 ("Home End", "top / bottom"),
+                ("n N", "next / previous search match"),
                 ("⏎", "start typing into claude"),
                 ("← Esc", "back to chat list"),
             ],
@@ -1107,6 +1110,21 @@ fn keymap_entries(app: &App) -> (&'static str, &'static [(&'static str, &'static
             &[("g", "first chat"), ("e", "last chat"), ("n", "next dir"), ("p", "prev dir"), ("←", "focus list"), ("→", "focus pane")],
         ),
         (Mode::Window, _) => ("Ctrl-w", &[("←", "focus list"), ("→", "focus pane"), ("w", "swap focus")]),
+        (Mode::Normal, Focus::Pane) if app.has_matches() => (
+            "pane · search matches",
+            &[
+                ("n N", "next / prev match"),
+                ("↑ ↓", "scroll"),
+                ("Shift-↑↓", "half page"),
+                ("Home End", "top / bottom"),
+                ("⏎", "type into claude"),
+                ("← Esc", "back to list"),
+                ("Tab", "next live chat"),
+                ("d", "kill"),
+                ("space", "menu…"),
+                ("?", "hide this map"),
+            ],
+        ),
         (Mode::Normal, Focus::Pane) => (
             "pane",
             &[

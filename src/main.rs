@@ -91,6 +91,9 @@ pub struct App {
     pub wrapped: Option<(String, u64, u16, Vec<ratatui::text::Line<'static>>, Vec<Option<usize>>)>,
     /// Chat whose preview should scroll to the search match once it's known.
     pub jump_to_match: Option<String>,
+    /// Match n/N last landed on (chat, line, preview_scroll), so stepping
+    /// continues from it even when the view couldn't scroll that far.
+    pub match_at: Option<(String, usize, usize)>,
     pub side_offset: usize,
     pub hits: Hits,
     expanded: std::collections::HashSet<PathBuf>,
@@ -129,6 +132,7 @@ impl App {
             preview: None,
             wrapped: None,
             jump_to_match: None,
+            match_at: None,
             side_offset: 0,
             hits: Hits::default(),
             expanded: Default::default(),
@@ -513,6 +517,42 @@ impl App {
         }
     }
 
+    /// The selected chat's transcript preview has search matches to step through.
+    pub fn has_matches(&self) -> bool {
+        self.selected.as_deref().is_some_and(|id| self.live(id).is_none() && self.search.hits.contains_key(id))
+    }
+
+    /// n/N: step through search matches in a transcript preview, wrapping.
+    /// False when the chat has no hits, so the key keeps its usual meaning.
+    fn step_match(&mut self, forward: bool) -> bool {
+        if !self.has_matches() {
+            return false;
+        }
+        let id = self.selected.clone().unwrap_or_default();
+        let Some((_, _, _, lines, owners)) = self.wrapped.as_ref().filter(|w| w.0 == id) else { return false };
+        let (len, ms) = (lines.len(), ui::match_lines(lines, owners, &self.search.query));
+        if ms.is_empty() {
+            self.info("the match is split across lines; scroll to find it");
+            return true;
+        }
+        let h = self.pane.0 as usize;
+        // From the last match we landed on, else from just above the view.
+        let anchor = match &self.match_at {
+            Some((mid, line, scroll)) if *mid == id && *scroll == self.preview_scroll => *line,
+            _ => len.saturating_sub(self.preview_scroll + h) + 1,
+        };
+        let i = if forward {
+            ms.iter().position(|&m| m > anchor).unwrap_or(0)
+        } else {
+            ms.iter().rposition(|&m| m < anchor).unwrap_or(ms.len() - 1)
+        };
+        self.preview_scroll = len.saturating_sub(ms[i].saturating_sub(2) + h).min(len.saturating_sub(h));
+        self.jump_to_match = None;
+        self.match_at = Some((id, ms[i], self.preview_scroll));
+        self.info(&format!("match {}/{}", i + 1, ms.len()));
+        true
+    }
+
     fn run_command(&mut self) {
         let line = std::mem::take(&mut self.cmdline);
         let (cmd, arg) = line.trim().split_once(' ').map(|(c, a)| (c, a.trim())).unwrap_or((line.trim(), ""));
@@ -783,6 +823,8 @@ impl App {
                         KeyCode::Home => return self.scroll(true, usize::MAX / 4),
                         KeyCode::End => return self.scroll(false, usize::MAX / 4),
                         KeyCode::Left | KeyCode::Esc => return self.focus = Focus::Sidebar,
+                        KeyCode::Char('n') if self.step_match(true) => return,
+                        KeyCode::Char('N') if self.step_match(false) => return,
                         _ => {}
                     }
                 }
