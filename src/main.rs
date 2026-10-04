@@ -55,6 +55,8 @@ pub struct Item {
     pub title: String,
     pub branch: Option<String>,
     pub mtime: Option<SystemTime>,
+    /// Where the filter matched inside the transcript, when it missed the title.
+    pub snippet: Option<String>,
 }
 
 pub enum Status<'a> {
@@ -80,6 +82,7 @@ pub struct App {
     pub selected: Option<String>,
     pub cmdline: String,
     pub filter: String,
+    pub search: search::Search,
     pub live_only: bool,
     pub msg: Option<(String, bool)>,
     pub preview: Option<(String, u64, Vec<Entry>)>,
@@ -116,6 +119,7 @@ impl App {
             selected: None,
             cmdline: String::new(),
             filter: String::new(),
+            search: Default::default(),
             live_only: false,
             msg: None,
             preview: None,
@@ -186,7 +190,14 @@ impl App {
             .map(|s| {
                 (
                     s.id.clone(),
-                    Item { id: s.id.clone(), cwd: s.cwd.clone(), title: s.title().into(), branch: s.branch.clone(), mtime: s.mtime },
+                    Item {
+                        id: s.id.clone(),
+                        cwd: s.cwd.clone(),
+                        title: s.title().into(),
+                        branch: s.branch.clone(),
+                        mtime: s.mtime,
+                        snippet: None,
+                    },
                 )
             })
             .collect();
@@ -194,13 +205,14 @@ impl App {
         for l in &self.lives {
             items.entry(l.id.clone()).or_insert_with(|| {
                 let s = data::Session::new_placeholder(&l.id, &l.cwd);
-                Item { id: l.id.clone(), cwd: l.cwd.clone(), title: s.title().into(), branch: None, mtime: s.mtime }
+                Item { id: l.id.clone(), cwd: l.cwd.clone(), title: s.title().into(), branch: None, mtime: s.mtime, snippet: None }
             });
         }
         let f = self.filter.to_lowercase();
         let now = SystemTime::now();
         let mut groups: HashMap<PathBuf, Vec<(SystemTime, Item)>> = HashMap::new();
-        for it in items.into_values() {
+        let content = (self.search.query == f).then_some(&self.search.hits);
+        for mut it in items.into_values() {
             let active = self.live(&it.id).is_some() || self.running.contains_key(&it.id);
             if self.live_only && !active {
                 continue;
@@ -209,7 +221,10 @@ impl App {
                 && !it.title.to_lowercase().contains(&f)
                 && !data::tilde(&it.cwd).to_lowercase().contains(&f)
             {
-                continue;
+                match content.and_then(|h| h.get(&it.id)) {
+                    Some(s) => it.snippet = Some(s.clone()),
+                    None => continue,
+                }
             }
             let key = if active { now } else { it.mtime.unwrap_or(SystemTime::UNIX_EPOCH) };
             groups.entry(it.cwd.clone()).or_default().push((key, it));
@@ -567,6 +582,13 @@ impl App {
         self.rebuild();
     }
 
+    /// Kick off a transcript search for the current filter, newest chats first.
+    fn update_search(&mut self) {
+        let mut files: Vec<_> = self.store.visible().map(|s| (s.mtime, s.id.clone(), s.file.clone())).collect();
+        files.sort_by(|a, b| b.0.cmp(&a.0));
+        self.search.start(&self.filter, files.into_iter().map(|(_, id, f)| (id, f)).collect());
+    }
+
     fn complete_path(&mut self) {
         let Some(arg) = ["new ", "n ", "open ", "o "].iter().find_map(|p| self.cmdline.strip_prefix(p)) else { return };
         let prefix_len = self.cmdline.len() - arg.len();
@@ -681,6 +703,7 @@ impl App {
                     KeyCode::Char(c) => self.filter.push(c),
                     _ => {}
                 }
+                self.update_search();
                 self.rebuild();
             }
             Mode::Space => {
@@ -781,6 +804,7 @@ impl App {
                     KeyCode::Esc => {
                         if !self.filter.is_empty() {
                             self.filter.clear();
+                            self.update_search();
                             self.rebuild();
                         }
                     }
@@ -808,6 +832,7 @@ impl App {
             Mode::Command => self.cmdline.push_str(s.lines().next().unwrap_or("")),
             Mode::Search => {
                 self.filter.push_str(s.lines().next().unwrap_or(""));
+                self.update_search();
                 self.rebuild();
             }
             _ => {}
@@ -868,6 +893,10 @@ fn main() -> std::io::Result<()> {
                 last_scan = Instant::now();
                 app.store.scan();
             }
+            app.rebuild();
+            dirty = true;
+        }
+        if app.search.poll() {
             app.rebuild();
             dirty = true;
         }
